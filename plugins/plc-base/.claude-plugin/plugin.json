@@ -1,0 +1,11 @@
+{
+  "name": "plc-base",
+  "version": "0.1.0",
+  "displayName": "PLC 工程基础(方法论)",
+  "description": "品牌中性的 PLC 开发方法论技能(连接/硬件/编程/复用/迁移/总览)。需配合一个品牌插件(如 plc-siemens,提供具体 MCP 工具与工具映射技能)。",
+  "author": { "name": "猫猫秋小裤", "url": "https://github.com/L261173157" },
+  "homepage": "https://github.com/L261173157/Ai-PLC-coding",
+  "repository": "https://github.com/L261173157/Ai-PLC-coding",
+  "license": "MIT",
+  "keywords": ["plc", "methodology", "skills"]
+}

@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <RootNamespace>TiaMcp.SimaticML</RootNamespace>
+    <Description>
+      Pure net10 SimaticML (FlgNet / StructuredText / GRAPH) parsing and generation for the
+      structured LAD/GRAPH read+write tools. No Siemens.Engineering references: the worker
+      already exports full block XML via the existing ReadBlockSource RPC, so everything here
+      operates on XML strings and keeps the net48 worker untouched.
+    </Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\TiaMcp.Contract\TiaMcp.Contract.csproj" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  TEMPLATE — this is the SOURCE for the worker's .exe.config. Do NOT hand-edit the generated
+  obj\<cfg>\net48\App.config; edit THIS file. At build time the GenerateWorkerAppConfig target
+  (see the csproj) replaces @TIA_NET48_URI@ with
+      file:///<TiaInstallDir>/PublicAPI/V<TiaApiVersion>/net48
+  derived from the csproj $(TiaInstallDir) property. To build/publish for a machine whose TIA
+  lives somewhere other than the csproj default, pass -p:TiaInstallDir=<that Portal V21 dir>
+  (e.g. -p:TiaInstallDir="C:\Program Files\Siemens\Automation\Portal V21"). The codeBase href
+  must point at the TARGET machine's PublicAPI\V21\net48 dir.
+-->
+<configuration>
+  <startup>
+    <supportedRuntime version="v4.0" sku=".NETFramework,Version=v4.8" />
+  </startup>
+  <runtime>
+    <!--
+      Siemens.Engineering.* are Copy-Local=False and NOT in the GAC on this install. A <codeBase>
+      hint loads them from the TIA install in the DEFAULT load context. This matters: Program.cs also
+      has an AssemblyResolve fallback, but Assembly.LoadFrom uses the *load-from* context, which fails
+      Siemens' Openness security handshake (EngineeringSecurityException at TiaPortal.Initialize).
+      codeBase is the Siemens-recommended way and keeps the default context, so the handshake passes.
+      The href below is injected from $(TiaInstallDir) — keep that property (and TIA_MCP_INSTALL_DIR
+      at runtime) pointed at the machine that will RUN the worker.
+    -->
+    <assemblyBinding xmlns="urn:schemas-microsoft-com:asm.v1">
+      <dependentAssembly>
+        <assemblyIdentity name="Siemens.Engineering.Base" publicKeyToken="29bfe5fdf4ba5d3b" culture="neutral" />
+        <codeBase version="21.0.0.0" href="@TIA_NET48_URI@/Siemens.Engineering.Base.dll" />
+      </dependentAssembly>
+      <dependentAssembly>
+        <assemblyIdentity name="Siemens.Engineering.Step7" publicKeyToken="29bfe5fdf4ba5d3b" culture="neutral" />
+        <codeBase version="21.0.0.0" href="@TIA_NET48_URI@/Siemens.Engineering.Step7.dll" />
+      </dependentAssembly>
+    </assemblyBinding>
+  </runtime>
+</configuration>

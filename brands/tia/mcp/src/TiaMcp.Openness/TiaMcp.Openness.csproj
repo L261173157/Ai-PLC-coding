@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <RootNamespace>TiaMcp.Openness</RootNamespace>
+    <Description>
+      Bridge backend: spawns the net48 Openness worker (TiaMcp.Openness.Worker, the only process that
+      can load Siemens.Engineering.* on TIA V21) and forwards ITiaBackend calls to it over a
+      stdin/stdout JSON-RPC channel. This project references NO Siemens assemblies.
+    </Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Shares DTO + ITiaBackend + the RPC message types (net10.0 target) with the worker. -->
+    <ProjectReference Include="..\TiaMcp.Contract\TiaMcp.Contract.csproj" />
+    <!-- Structured LAD/GRAPH parsing on top of the existing ReadBlockSource RPC (worker untouched). -->
+    <ProjectReference Include="..\TiaMcp.SimaticML\TiaMcp.SimaticML.csproj" />
+  </ItemGroup>
+
+  <!--
+    System.Text.Json AND Microsoft.Win32.Registry (used by WorkerChannel.PatchWorkerCodeBase to
+    auto-discover the local TIA net48 API dir) are both in-box on net10.0 — no package reference needed.
+    The registry API throws only if actually called off-Windows, which never happens here (the worker
+    path is Windows/TIA-only).
+  -->
+</Project>

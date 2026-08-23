@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <RootNamespace>TiaMcp.Contract</RootNamespace>
+    <Description>TiaMcp abstraction layer: interfaces + DTOs. Never references Siemens.Engineering.</Description>
+    <!--
+      Multi-target so BOTH the net10 MCP server AND the net48 Openness worker share the exact same
+      DTO + ITiaBackend types (the worker is .NET Framework 4.8; the server is net10.0). This is what
+      lets the net10 BridgeBackend and the net48 worker exchange JSON that round-trips into the same
+      types with zero drift. netstandard2.0 needs no extra reference assemblies (the SDK ships them),
+      so this builds on a machine without the net48 dev pack.
+
+      Directory.Build.props sets TargetFramework=net10.0 globally; clearing it here lets the plural
+      TargetFrameworks drive the outer (multi-TFM) build instead of the singular short-circuiting it.
+    -->
+    <TargetFrameworks>net10.0;netstandard2.0</TargetFrameworks>
+    <TargetFramework></TargetFramework>
+  </PropertyGroup>
+</Project>

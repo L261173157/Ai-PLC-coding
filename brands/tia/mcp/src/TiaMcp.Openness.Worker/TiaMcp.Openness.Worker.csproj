@@ -1,0 +1,80 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>TiaMcp.Openness.Worker</RootNamespace>
+    <AssemblyName>TiaMcp.Openness.Worker</AssemblyName>
+    <Description>
+      .NET Framework 4.8 worker: the ONLY process in the solution that loads Siemens.Engineering.*
+      (TIA V21 Openness is net48-only). The net10 MCP server spawns this worker and talks to it over
+      stdin/stdout JSON-RPC via BridgeBackend. NOT in TiaMcp.slnx on purpose (it builds only on a TIA
+      machine with the net48 dev pack), so the solution stays green everywhere else.
+    </Description>
+
+    <!-- TIA V21 = net48. Directory.Build.props forces net10.0 globally; override here. -->
+    <TargetFramework>net48</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <!-- This worker always links the Siemens SDK, so the real Siemens code compiles unconditionally. -->
+    <DefineConstants>$(DefineConstants);HAVE_TIA_SDK</DefineConstants>
+
+    <!-- Defaults for this machine (verified D: drive install). Override with -p:TiaInstallDir=... -->
+    <TiaInstallDir Condition="'$(TiaInstallDir)' == ''">D:\Program Files\Siemens\Automation\Portal V21</TiaInstallDir>
+    <TiaApiVersion Condition="'$(TiaApiVersion)' == ''">21</TiaApiVersion>
+
+    <!--
+      URI form of the net48 API dir, baked into the worker's .exe.config <codeBase> at build time
+      (see GenerateWorkerAppConfig below). Backslashes -> '/', spaces -> %20 so it is a valid file URI.
+      Deploying to a machine whose TIA lives elsewhere: publish with -p:TiaInstallDir=<its Portal V21>.
+      NOTE: '%2520' is the MSBuild-escaped form of the literal '%20' (MSBuild decodes '%20' to a space).
+    -->
+    <TiaNet48Uri>file:///$(TiaInstallDir.Replace('\','/').Replace(' ','%2520'))/PublicAPI/V$(TiaApiVersion)/net48</TiaNet48Uri>
+    <!--
+      Use the generated config (from App.config.template) instead of a hand-edited App.config. The path
+      must be stable at EVALUATION time, so it is built from $(MSBuildProjectDirectory) (always defined)
+      rather than $(IntermediateOutputPath), which is still empty while the project body is evaluated.
+    -->
+    <_GeneratedAppConfig>$(MSBuildProjectDirectory)\obj\App.generated.config</_GeneratedAppConfig>
+    <AppConfig>$(_GeneratedAppConfig)</AppConfig>
+  </PropertyGroup>
+
+  <!--
+    Generate the worker's app config from App.config.template, injecting the TIA install URI into the
+    codeBase href. Runs before the config is consumed/copied or validated. NOT incremental on purpose:
+    the URI can change between builds (different -p:TiaInstallDir) while the template stays put.
+  -->
+  <Target Name="GenerateWorkerAppConfig" BeforeTargets="PrepareForBuild">
+    <MakeDir Directories="$(MSBuildProjectDirectory)\obj" />
+    <WriteLinesToFile File="$(_GeneratedAppConfig)" Overwrite="true"
+                      Lines="$([System.IO.File]::ReadAllText('$(MSBuildProjectDirectory)\App.config.template').Replace('@TIA_NET48_URI@','$(TiaNet48Uri)'))" />
+    <Message Importance="high" Text="[worker] Generated App.config codeBase -&gt; $(TiaNet48Uri)" />
+  </Target>
+
+  <!--
+    Copy Local MUST be False: Siemens' OpennessLocationProvider refuses to start if Siemens.Engineering
+    is loaded from a copied location (it throws "ensure Copy Local is set to false"). These DLLs are
+    also NOT in the GAC on this install, so the CLR can't find them by normal probing. Program.cs
+    hooks AppDomain.AssemblyResolve to load them from the TIA install's PublicAPI\V21\net48 dir —
+    that keeps their Location inside the TIA tree (provider is happy) while still being resolvable.
+  -->
+  <ItemGroup>
+    <Reference Include="Siemens.Engineering.Base">
+      <HintPath>$(TiaInstallDir)\PublicAPI\V$(TiaApiVersion)\net48\Siemens.Engineering.Base.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="Siemens.Engineering.Step7">
+      <HintPath>$(TiaInstallDir)\PublicAPI\V$(TiaApiVersion)\net48\Siemens.Engineering.Step7.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Shares DTO + ITiaBackend with the net10 server (Contract multi-targets to netstandard2.0). -->
+    <ProjectReference Include="..\TiaMcp.Contract\TiaMcp.Contract.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- System.Text.Json is in-box on net10; on net48 it is a NuGet package. -->
+    <PackageReference Include="System.Text.Json" Version="8.0.5" />
+  </ItemGroup>
+</Project>

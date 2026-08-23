@@ -1,0 +1,83 @@
+name: ci
+
+# CI 范围:无需 TIA 的那部分——net10 构建 + Fake 离线自检 + 三档 stdio 烟测 + G1/G3/G9 回归 +
+# 打包脚本语法解析。真 TIA(net48 worker 构建 / smoke_openness* / read_full_project 等)需 V21
+# 机器 + Siemens DLL + Windows + 'Siemens TIA Openness' 组,无法在公共 runner 上跑,故不在此覆盖;
+# 改 worker 后端逻辑仍须本地单独 `dotnet build ...TiaMcp.Openness.Worker.csproj` 并跑 verify_live_fixes.py。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    name: build (net10) + Fake selftest + smoke
+    runs-on: ubuntu-latest
+    env:
+      # Release 构建后的 server DLL;三个 Fake 烟测脚本都拿它当 argv[1]。
+      SERVER_DLL: brands/tia/mcp/src/TiaMcp.Server/bin/Release/net10.0/TiaMcp.Server.dll
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: dotnet --info
+        run: dotnet --info
+
+      # 构建 4 个 net10 工程;net48 worker 故意不进 slnx,故 Linux 上也能绿(不会触碰 Siemens DLL)。
+      - name: Build TiaMcp.slnx
+        run: dotnet build brands/tia/mcp/TiaMcp.slnx -c Release
+
+      # 离线自检:直接驱动 Fake 后端(不走 MCP / 不走 guard),成功 exit 0。
+      - name: Fake offline selftest (--selftest)
+        run: dotnet "$SERVER_DLL" --selftest
+
+      - name: stdio MCP smoke · ReadOnly / ReadWrite / Unrestricted (Fake)
+        run: python brands/tia/mcp/tests/smoke_mcp.py "$SERVER_DLL"
+
+      - name: new-tools smoke · disconnect + tagtable_export (Fake)
+        run: python brands/tia/mcp/tests/smoke_new_tools.py "$SERVER_DLL"
+
+      - name: G1/G3/G9 regression (Fake · ReadOnly)
+        run: python brands/tia/mcp/tests/verify_fixes.py "$SERVER_DLL"
+
+      - name: structured LAD/GRAPH read+write smoke (Fake)
+        run: python brands/tia/mcp/tests/smoke_lad_graph.py "$SERVER_DLL"
+
+  lint-scripts:
+    name: parse packaging scripts (.ps1)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Parse all scripts/*.ps1 (catch here-string / syntax errors before a release build)
+        shell: pwsh
+        run: |
+          $files = @(
+            'scripts/build-plugin.ps1',
+            'scripts/package-marketplace.ps1',
+            'scripts/build-installer.ps1',
+            'scripts/dev-sync-plugins.ps1'
+          )
+          $any = $false
+          foreach ($f in $files) {
+            if (-not (Test-Path $f)) { Write-Host "skip (absent): $f"; continue }
+            $errs = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $f).Path, [ref]$null, [ref]$errs)
+            if ($errs.Count) { Write-Host "::error file=$f::PARSE ERRORS"; $errs | ForEach-Object { Write-Host "  - $($_.Message)" }; $any = $true }
+            else { Write-Host "OK: $f" }
+          }
+          if ($any) { exit 1 }

@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <RootNamespace>TiaMcp.Fake</RootNamespace>
+    <Description>In-memory TIA backend: runs the whole MCP surface without TIA installed (dev / CI / dry-run).</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\TiaMcp.Contract\TiaMcp.Contract.csproj" />
+    <ProjectReference Include="..\TiaMcp.SimaticML\TiaMcp.SimaticML.csproj" />
+  </ItemGroup>
+</Project>

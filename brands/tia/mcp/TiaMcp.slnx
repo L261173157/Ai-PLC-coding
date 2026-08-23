@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Solution>
+  <Project Path="src\TiaMcp.Contract\TiaMcp.Contract.csproj" />
+  <Project Path="src\TiaMcp.Fake\TiaMcp.Fake.csproj" />
+  <Project Path="src\TiaMcp.Openness\TiaMcp.Openness.csproj" />
+  <Project Path="src\TiaMcp.SimaticML\TiaMcp.SimaticML.csproj" />
+  <Project Path="src\TiaMcp.Server\TiaMcp.Server.csproj" />
+</Solution>

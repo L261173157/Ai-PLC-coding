@@ -1,0 +1,51 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>TiaMcp.Server</RootNamespace>
+    <Description>MCP server exposing TIA Portal Openness to agent dev tools (Claude Code / Cursor).</Description>
+  </PropertyGroup>
+
+  <!-- ASP.NET Core shared framework: needed for the "transport http" (streamable HTTP) mode. -->
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!--
+      The tool layer depends on TiaMcp.Contract ONLY (see Tools). Program.cs is the
+      composition root and wires a concrete backend (Fake or Openness) selected by the
+      "backend" command line argument.
+    -->
+    <ProjectReference Include="..\TiaMcp.Contract\TiaMcp.Contract.csproj" />
+    <ProjectReference Include="..\TiaMcp.Fake\TiaMcp.Fake.csproj" />
+    <ProjectReference Include="..\TiaMcp.Openness\TiaMcp.Openness.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.9" />
+    <PackageReference Include="ModelContextProtocol" Version="1.4.0" />
+    <PackageReference Include="ModelContextProtocol.AspNetCore" Version="1.4.0" />
+  </ItemGroup>
+
+  <!--
+    Bundle the net48 Openness worker into the server's publish output so the server+worker ship as
+    one folder. The worker can't be a ProjectReference (cross-TFM: net10 host, net48 worker), and its
+    Siemens DLLs are Copy-Local=False (resolved from the target's TIA install at runtime), so the
+    worker must be PRE-BUILT on a TIA machine before publishing the server. BridgeBackend then finds
+    it at <server-exe-dir>/openness-worker/.
+  -->
+  <Target Name="BundleOpennessWorker" AfterTargets="Publish"
+          Condition="!Exists('$(PublishDir)openness-worker\TiaMcp.Openness.Worker.exe')">
+    <PropertyGroup>
+      <_WorkerSrc>$(MSBuildThisFileDirectory)..\TiaMcp.Openness.Worker\bin\$(Configuration)\net48</_WorkerSrc>
+      <_WorkerDest>$(PublishDir)openness-worker</_WorkerDest>
+    </PropertyGroup>
+    <Error Condition="!Exists('$(_WorkerSrc)\TiaMcp.Openness.Worker.exe')"
+           Text="The net48 Openness worker is not built. Build it first on a TIA V21 machine: 'dotnet build mcp/src/TiaMcp.Openness.Worker -c $(Configuration)' (needs the .NET Framework 4.8 dev pack + Siemens.Engineering.* refs from the local TIA install)." />
+    <ItemGroup>
+      <_WorkerFiles Include="$(_WorkerSrc)\**\*.*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_WorkerFiles)" DestinationFolder="$(_WorkerDest)\%(RecursiveDir)" />
+    <Message Importance="high" Text="Bundled openness worker -> $(_WorkerDest)" />
+  </Target>
+</Project>

@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "tia-mcp": {
+      "command": "dotnet",
+      "args": [
+        "run",
+        "--project",
+        "${CLAUDE_PLUGIN_ROOT}/../../brands/tia/mcp/src/TiaMcp.Server/TiaMcp.Server.csproj",
+        "--",
+        "--backend",
+        "openness",
+        "--mode",
+        "ReadWrite"
+      ]
+    }
+  }
+}
