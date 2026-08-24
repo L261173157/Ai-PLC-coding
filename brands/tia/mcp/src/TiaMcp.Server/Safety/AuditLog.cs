@@ -16,7 +16,7 @@ public sealed class AuditLog
 
     public string DirectoryPath => _dir;
 
-    public void Append(string operation, string scope, bool success, string? error = null)
+    public void Append(string operation, string scope, bool success, string? error = null, string? details = null)
     {
         try
         {
@@ -29,6 +29,7 @@ public sealed class AuditLog
                 scope,
                 success,
                 error,
+                details,
             };
             File.AppendAllText(file, JsonSerializer.Serialize(entry) + "\n");
         }

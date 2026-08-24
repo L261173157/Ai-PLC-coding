@@ -135,7 +135,7 @@ internal static class PowerFlow
                 var pt = pins.TryGetValue("pt", out var ptLower) ? ptLower
                     : pins.TryGetValue("PT", out var ptUpper) ? ptUpper
                     : null;
-                boxes.Add(new NetworkBox(term.Name, term.Instance, pins));
+                boxes.Add(new NetworkBox(term.DisplayName, term.Instance, pins));
                 pieces.Add($"{feedText}{term.Name}[{term.Instance ?? ""}{(pt is null ? "" : ", PT=" + pt)}]");
 
                 // A coil wired to the timer's Q rides the same rung (verified legal).
@@ -155,8 +155,8 @@ internal static class PowerFlow
             }
             else
             {
-                boxes.Add(new NetworkBox(term.Name, term.Instance, pins));
-                pieces.Add(feedText + BoxSummary(term, pins));
+                boxes.Add(new NetworkBox(term.DisplayName, term.Instance, pins));
+                pieces.Add(feedText + BoxSummary(model, term, pins));
             }
         }
 
@@ -176,10 +176,12 @@ internal static class PowerFlow
         return true;
     }
 
-    private static string BoxSummary(PartNode part, Dictionary<string, string> pins)
+    private static string BoxSummary(FlgNetModel model, PartNode part, Dictionary<string, string> pins)
     {
         switch (part.Name)
         {
+            case "Call":
+                return CallSummary(model, part, pins);
             case "Move":
                 var src = pins.TryGetValue("in", out var moveIn) ? moveIn : "?";
                 var dst = pins.TryGetValue("out1", out var moveOut) ? moveOut
@@ -197,6 +199,38 @@ internal static class PowerFlow
                     .Select(kv => $"{kv.Key}={kv.Value}"));
                 return string.IsNullOrEmpty(args) ? part.Name : $"{part.Name}({args})";
         }
+    }
+
+    /// <summary>Renders a block invocation: "CALL FB_CylManual [DB_ManA](Ext_PB=PB_A_Ext AND
+    /// Mode_Man, Ext_Limit=A_Ext_Limit)". Data-line parameters come from BindPins; energy-flow
+    /// (bool) parameters are fed by contact-chain wires and are traced back to their expression.
+    /// Unconnected pins (TIA re-exports them in the signature) are skipped.</summary>
+    private static string CallSummary(FlgNetModel model, PartNode part, Dictionary<string, string> pins)
+    {
+        var args = new List<string>();
+        foreach (var kv in pins.Where(kv => kv.Key is not ("en" or "eno" or "operand")))
+        {
+            args.Add($"{kv.Key}={kv.Value}");
+        }
+
+        // Energy-flow parameters: the wire's source is a part pin (contact-chain tail), not an
+        // access — BindPins never sees them, so trace each through the boolean backbone.
+        var bound = new HashSet<string>(pins.Keys);
+        foreach (var wire in model.Wires.Where(w => w.Source is PinEnd))
+        {
+            foreach (var t in wire.Targets.OfType<PinEnd>())
+            {
+                if (t.PartUId == part.UId && !bound.Contains(t.Pin) && t.Pin is not ("en" or "eno"))
+                {
+                    bound.Add(t.Pin);
+                    var term = EvalPin(model, new HashSet<FlgEndpoint>(), t);
+                    args.Add($"{t.Pin}={term?.Text ?? "?"}");
+                }
+            }
+        }
+
+        var inst = part.Instance is null ? "" : $" [{part.Instance}]";
+        return $"CALL {part.CalledBlock ?? "?"}{inst}({string.Join(", ", args)})";
     }
 
     private static string ArithSymbol(string name) => name switch

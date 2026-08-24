@@ -54,15 +54,21 @@ public sealed class CodeTools
 
     [McpServerTool(Name = "tia_block_write_code")]
     [Description(
-        "Write a LAD or GRAPH block from a structured JSON spec (write; needs --mode ReadWrite): the " +
+        "Write a LAD or GRAPH block from a STRUCTURED JSON SPEC (write; needs --mode ReadWrite): the " +
         "spec is compiled net10-side into SimaticML XML and imported through the same path as " +
         "tia_block_import (ImportOptions.Override — re-writing the same name is idempotent, no delete " +
-        "first). LAD v1 instruction set: contacts (NO/NC), nested and/or trees, coil/set/reset, IEC " +
+        "first). ⚠ Pick by INPUT TYPE, not by 'writing a block': a JSON spec with networks/sequence → " +
+        "this tool; raw SCL/AWL text → tia_block_generate_from_source; SimaticML XML → tia_block_import. " +
+        "LAD v1 instruction set: contacts (NO/NC), nested and/or trees, coil/set/reset, IEC " +
         "timers ton/tof/tp (multi-instance + PT, on FB), move, inline compares eq/ne/ge/gt/le/lt. " +
         "GRAPH: a linear sequence (machine-verified from-scratch shape, compiles 0 errors on TIA V21) " +
-        "via `sequence: [{ name, actions: [{ qualifier: N|R|S|D|L|…, operand }], transitionOperand }]`; " +
-        "the first non-standard Input member doubles as the mandatory supervision/interlock condition. " +
-        "Use dryRun=true to get the generated XML without importing (allowed in ReadOnly). FBD is read-only.")]
+        "via `sequence: [{ name, actions: [{ qualifier: N|R|S|D|L|…, operand }], transitionOperand }]` " +
+        "— at most ONE action per step (TIA V21 XML import rejects more; split extra actions into " +
+        "their own steps or drive the operand from the calling OB). Set `loop: true` to close the " +
+        "sequence with a Jump connection back to the initial step (machine-verified circular " +
+        "sequencer). The first non-standard Input member doubles as the mandatory supervision/interlock " +
+        "condition. Use dryRun=true to get the generated XML without importing (allowed in ReadOnly). " +
+        "FBD is read-only.")]
     public async Task<object> TiaBlockWriteCodeAsync(
         [Description("PLC scope path, e.g. .../device:PLC_1/plc:program. Append '/blockgroup:NAME' to target a block subgroup.")]
         string plcPath,
@@ -70,7 +76,9 @@ public sealed class CodeTools
             "Block spec as a JSON string: { name, blockType: FB|FC, language: LAD|GRAPH, comment?, " +
             "interface: [{ section, members: [{ name, datatype, comment?, startValue? }] }], " +
             "networks: [{ title?, rungs: [{ logic: <expr>, output: <out> }] }] (LAD) | " +
-            "sequence: [{ name, actions: [{qualifier, operand}], transitionOperand? }] (GRAPH) }. " +
+            "sequence: [{ name, actions: [{qualifier, operand}], transitionOperand? }] (GRAPH) | " +
+            "loop?: true (GRAPH: last transition jumps back to the initial step) }. " +
+            "NOT raw SCL text (that is tia_block_generate_from_source) and NOT SimaticML XML (tia_block_import). " +
             "logic expr: { op: contact, operand, negated? } | { op: and|or, args: [expr,…] }. " +
             "output: { kind: coil|set|reset, operand } | { kind: ton|tof|tp, instance, pt, q?: coil } | " +
             "{ kind: move, src, dst } | { kind: compare, part: eq|ne|ge|gt|le|lt, in1, in2, out?: coil }.")]

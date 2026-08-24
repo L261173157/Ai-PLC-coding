@@ -58,11 +58,11 @@ internal static class FlgNetParser
                         }
                         break;
                     case "Instance":
-                        instance = FirstComponentName(child);
+                        instance = ComponentPath(child);
                         break;
                     case "CallInfo":
                         // Call boxes carry the called block under CallInfo; surface it as the "instance".
-                        instance ??= FirstComponentName(child);
+                        instance ??= ComponentPath(child);
                         break;
                 }
             }
@@ -75,6 +75,33 @@ internal static class FlgNetParser
                 Instance = instance,
                 Negated = negated,
                 TemplateValues = templates,
+            };
+        }
+
+        // <Call> is a SIBLING of <Part> under Parts (verified on real V21 exports: FB calls with a
+        // global instance DB), not a <Part Name="Call"> — a separate element carrying the invocation
+        // in its CallInfo (invoked block + instance DB + full formal parameter signature, which TIA
+        // re-exports even for unconnected pins). Normalize it into a PartNode so the catalog's
+        // existing "Call" box entry renders it.
+        foreach (var el in partsEl.Elements().Where(e => LocalName(e) == "Call"))
+        {
+            var uid = AttrLong(el, "UId");
+            var info = Child(el, "CallInfo");
+            var called = info?.Attribute("Name")?.Value;
+            if (uid is null || info is null || string.IsNullOrEmpty(called))
+            {
+                continue;
+            }
+
+            parts[uid.Value] = new PartNode
+            {
+                UId = uid.Value,
+                Name = "Call",
+                Instance = Child(info, "Instance") is { } inst ? ComponentPath(inst) : null,
+                CalledBlock = called,
+                CallBlockType = info.Attribute("BlockType")?.Value,
+                Negated = new HashSet<string>(),
+                TemplateValues = new Dictionary<string, string>(),
             };
         }
 
@@ -195,7 +222,7 @@ internal static class FlgNetParser
     private static string AccessText(XElement access)
     {
         var scope = access.Attribute("Scope")?.Value ?? "";
-        if (Child(access, "Symbol") is { } symbol && FirstComponentName(symbol) is { } path)
+        if (Child(access, "Symbol") is { } symbol && ComponentPath(symbol) is { } path)
         {
             // Raw operand names everywhere (locals and globals alike): structured fields and
             // render strings stay round-trippable with tia_block_write_code specs, and the
@@ -212,20 +239,35 @@ internal static class FlgNetParser
         return text.Length > 0 ? text : scope;
     }
 
-    /// <summary>Dot-joins a Symbol/Instance/CallInfo child's nested Component chain
-    /// (e.g. Data.Block → "MyDB.MyTag").</summary>
-    internal static string? FirstComponentName(XElement el)
+    /// <summary>Dot-joins a Component chain into an operand path (e.g. "MyDB.MyTag"). Accepts the
+    /// element that carries the components (Symbol, Instance, CallInfo) or one wrapper above them
+    /// (Access). Handles BOTH shapes TIA emits: sibling Components under Symbol (DB member refs
+    /// re-export as <c>&lt;Component Name="DB"/&gt;&lt;Component Name="Field"/&gt;</c>) and nested
+    /// Components (multi-level paths) — each top-level Component's own chain is walked, and every
+    /// name joins the path.</summary>
+    internal static string? ComponentPath(XElement el)
     {
-        var comp = DescendComponents(el).FirstOrDefault();
-        return comp is null ? null : string.Join(".", DescendComponents(el).Select(c => c.Attribute("Name")?.Value ?? ""));
+        var names = new List<string>();
+        Collect(el, names);
+        return names.Count == 0 ? null : string.Join(".", names);
 
-        static IEnumerable<XElement> DescendComponents(XElement start)
+        static void Collect(XElement el, List<string> names)
         {
-            var current = Child(start, "Component");
-            while (current is not null)
+            foreach (var top in el.Elements().Where(e => LocalName(e) == "Component"))
             {
-                yield return current;
-                current = Child(current, "Component");
+                var current = top;
+                while (current is not null)
+                {
+                    names.Add(current.Attribute("Name")?.Value ?? "");
+                    current = current.Elements().FirstOrDefault(e => LocalName(e) == "Component");
+                }
+            }
+
+            // Access (and CallInfo) wrap their components in Symbol/Instance — descend one
+            // wrapper level so callers can hand us either the wrapper or the carrier itself.
+            foreach (var wrapper in el.Elements().Where(e => LocalName(e) is "Symbol" or "Instance"))
+            {
+                Collect(wrapper, names);
             }
         }
     }

@@ -11,8 +11,9 @@ namespace TiaMcp.SimaticML.Graph;
 /// (…/SW/NetworkSource/Graph/v6); steps carry Actions (qualifier + Token/access operands),
 /// per-step Supervision (…SvCoil) and Interlock (…IlCoil) subnetworks; transitions carry their
 /// condition FlgNet ending in TrCoil; the chain is wired by Step/Transition refs and terminates
-/// in an EndConnection. Step and transition numbers are PAIRED (1, 21, 32, … — TIA numbers each
-/// step/transition pair with the same id).
+/// in an EndConnection — OR, for closed sequencers, in a Jump connection back to the initial
+/// step (emitted by write_code's `loop: true`; surfaced here as <c>Loop</c>). Step and transition
+/// numbers are PAIRED (1, 21, 32, … — TIA numbers each step/transition pair with the same id).
 /// </summary>
 internal static class GraphCodeReader
 {
@@ -55,10 +56,27 @@ internal static class GraphCodeReader
             parsedTransitions.Add(new GraphTransition(number, name, RenderCondition(flg)));
         }
 
+        // Closed sequencer: a Connection whose LinkType is Jump and whose target is the initial
+        // step (the machine-verified shape write_code's `loop: true` emits; read/write symmetric).
+        var initNumber = steps.FirstOrDefault(s => s.Init)?.Number ?? steps.FirstOrDefault()?.Number;
+        var loop = initNumber is not null
+            && graphEl.Descendants()
+                .Where(e => e.Name.LocalName == "Connection")
+                .Select(conn => new
+                {
+                    Jump = (conn.Elements().FirstOrDefault(e => e.Name.LocalName == "LinkType")?.Value ?? "")
+                        .Equals("Jump", StringComparison.OrdinalIgnoreCase),
+                    Target = conn.Elements().FirstOrDefault(e => e.Name.LocalName == "NodeTo")?
+                        .Descendants().FirstOrDefault(e => e.Name.LocalName == "StepRef")?
+                        .Attribute("Number")?.Value,
+                })
+                .Any(c => c.Jump && c.Target is not null
+                    && int.TryParse(c.Target, out var n) && n == initNumber);
+
         var note = steps.Count == 0 && parsedTransitions.Count == 0
             ? "Graph element present but carries no steps/transitions."
             : null;
-        return new GraphCode(steps, parsedTransitions, note);
+        return new GraphCode(steps, parsedTransitions, note, loop);
     }
 
     private static GraphStep ParseStep(XElement stepEl)

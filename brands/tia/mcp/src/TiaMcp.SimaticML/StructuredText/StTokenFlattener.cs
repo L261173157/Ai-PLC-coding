@@ -28,7 +28,7 @@ internal static class StTokenFlattener
                     break;
                 case "Access":
                     // Access in the token stream carries the symbol inline (Symbol/Component or Text).
-                    sb.Append(el.Attribute("Text")?.Value ?? FlgNet.FlgNetParser.FirstComponentName(el) ?? el.Value.Trim());
+                    sb.Append(el.Attribute("Text")?.Value ?? FlgNet.FlgNetParser.ComponentPath(el) ?? el.Value.Trim());
                     break;
                 case "Comment":
                     sb.Append(el.Value);

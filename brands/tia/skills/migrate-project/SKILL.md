@@ -90,6 +90,7 @@ tia_tagtable_export path=<device>/plc:program/tagtable:<Table>  outDir=plc/.tag_
 ```
 
 ⚠️ **save_as 的坑:**
+- **`rebind=false` 也有句柄漂移(2026-08-23 实测)**:SaveAs 是**移动语义**——执行后源 project 对象的 Path 已变成克隆路径。旧版 worker 把这个漂移句柄留在注册表里,后续 save/archive/status 全部**实际作用于克隆却报着源名**,且克隆目录锁不释放(第二个 Portal 开克隆报 "already been opened by user …")。已修复(漂移句柄随 SaveAs 移除并关闭);旧 worker 上的症状:`close_project` 的 message 显示克隆路径。处置:close 漂移句柄 + 重开源项目即可。
 - **`rebind=true` 会留 disposed 旧句柄**:save_as 内部 Close 源 + 立即 Open 同名克隆,worker 缓存的 Project 引用变成 disposed → `tia_project_list` 抛 `EngineeringObjectDisposedException`,`tia_project_open` 报 "another project already open"。**修法**:用 `rebind=false` + 显式 close+open(上面那样);万一已经踩了,`tia_disconnect`(新工具,见下)释放整个 Portal 再重连即可,不必 kill 进程。代码层已加防御(`ResolveProject` 跳过 disposed 句柄),但 rebind=false 路线最干净。
 - **克隆按新名寻址**:save_as 后克隆用 `project:<新名>` 寻址(实测内部名会跟文件夹名),**不是**源名。
 - **`tia_status` 的 `tiaAvailable`**: = TIA V21 是否**装了**(注册表探测),不随"有没有开 session"变;别据此判断"没装 TIA"。
@@ -122,13 +123,18 @@ tia_disconnect        # 关项目 + Dispose Portal,worker 留着,下次 tia_conn
 
 | 报错 | 原因 / 修法 |
 |------|-------------|
-| `Data type "X" is unknown`(导入时) | 缺被引用的类型/块;先导它(UDT 用拓扑序 `merge.ps1`,块用多趟重试) |
-| `culture 'en-GB' ... does not exist within the current project` | 目标项目缺注释语言;`strip-cultures.ps1` 剥文化,或把项目注释语言设成和源一致 |
+| `Data type "X" is unknown`(导入时) | 缺被引用的类型/块;先导它(UDT 用拓扑序 `merge.ps1`,块用多趟重试)。**依赖清单别猜**:从块源 XML 提取 `&quot;datatype\w+&quot;` 全集,对照已搬集合补缺(2026-08-23 实测:Cylinder FB 还依赖 datatypeCylinderControl,不止两个显眼类型) |
+| `type group not found`(UDT 导入子组) | `tia_udt_import` 的 `typegroup:NAME` **不自动建组**——先 `tia_group_create(kind="type", name=...)` 再导入 |
+| `culture 'en-GB' ... does not exist within the current project` | 目标项目缺注释语言;`strip-cultures.ps1` 剥文化,或把项目注释语言设成和源一致。⚠️ 块级剥文化的 ID 匹配要**十六进制**(`ID="B"`——TIA 导出 ID 过 9 后用 A,B,C…),纯数字正则漏剥(2026-08-23 实测) |
+| `It is not possible to add 'ns0:Member' to the parent element` | 合并脚本用 XML 库(ElementTree 等)序列化时产生 `ns0:` 前缀,**TIA SimaticML 只认默认命名空间**——序列化后把 `xmlns:ns0="URL"` 还原为 `xmlns="URL"` 并剥掉所有前缀 |
+| UDT 导出文件名带 hash 后缀 | `tia_block_export` 导 UDT 得 `datatypeX.<hash>.xml`——按前缀改名/匹配,别按精确名找文件 |
 | `block name 'X' ... already exists in this CPU` | 同名已在别处;UDT 导入子组会先删(move 语义);块目前不删,先 `tia_block_delete` |
 | `Inconsistent blocks and PLC data types (UDT) cannot be exported` | 对象刚导入未编译;导出前先 `tia_project_compile` 让它一致 |
 | `Tag "AlwaysTRUE"/"FirstScan"/"Clock_*" not defined`(**编译时**) | 目标项目没启用 CPU 系统/时钟存储字节;`tia_cpu_system_clock_memory` 配 MB1+MB0,TIA 自动建出这些 tag(见工作流 C) |
 | 导入子组返回 `Imported 0` | 正常——删同名又建,全工程 diff=0;看 `groupPath` 确认移动 |
+| 归档文件没有 `.zap1x` 扩展 | 旧版 worker 把 archiveName 原样传 TIA(不追加扩展)。已修复(worker 自动拼后缀并返回归档全路径);旧 worker 上的产物手动改名即可 |
 | worker 构建报 DLL 被锁 | 跑着的 worker 锁了输出;`Stop-Process -Name TiaMcp.Openness.Worker` 再 build,server 自动重启新 worker |
+| **改了代码但行为没变** | ⚠️ 部署副本陷阱(2026-08-23 实测):插件安装位的 `server/` 是静态二进制(含 `openness-worker/`),worker spawn 优先用它——**仓库重编不等于安装位更新**。kill worker 后把新 exe/dll 复制到安装位(server dll 被运行进程锁定,需重启 Claude Code 后覆盖) |
 
 ## 校验
 

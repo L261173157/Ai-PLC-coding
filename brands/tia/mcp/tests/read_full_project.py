@@ -192,6 +192,11 @@ def read_plc(d, plc):
         d.one("tia_block_read_source", {"path": bp}, f"{base}/source.json")
         d.one("tia_interface_read", {"path": bp}, f"{base}/interface.json")
         d.one("tia_cross_reference", {"path": bp}, f"{base}/xref.json")
+        # Structured code view for LAD/GRAPH bodies: boolean rungs / step sequences (+loop) are
+        # far more digestible than the raw SimaticML source; SCL text lands in source.json anyway.
+        lang = (b.get("language") or "").upper()
+        if lang in ("LAD", "GRAPH"):
+            d.one("tia_block_read_code", {"path": bp, "includeInterface": False}, f"{base}/code.json")
         drilled += 1
     print(f"     blocks={len(all_blocks)} groups={len(groups)} drilled={drilled}{(' [ABORTED]' if aborted else '')}")
     return {"name": plc["name"], "path": dev, "block_total": len(all_blocks),

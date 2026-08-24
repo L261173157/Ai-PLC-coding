@@ -19,10 +19,13 @@ internal sealed record OpenEnd : FlgEndpoint;
 internal sealed record AccessNode(long UId, string Scope, string Text);
 
 /// <summary>
-/// One FlgNet part (an instruction: Contact, Coil, O, TON, Move, …). <c>Negated</c> holds pin names
-/// negated via <c>&lt;Negated Name="operand"/&gt;</c>; <c>TemplateValues</c> holds template values
-/// (Cardinality, time_type, …); <c>BoundOperand</c> is filled by the parser from the
-/// IdentCon→NameCon(operand) wire.
+/// One FlgNet part (an instruction: Contact, Coil, O, TON, Move, …) — including <c>&lt;Call&gt;</c>
+/// elements, which are siblings of <c>&lt;Part&gt;</c> under Parts but normalized into the same
+/// node with <c>Name = "Call"</c>. <c>Negated</c> holds pin names negated via
+/// <c>&lt;Negated Name="operand"/&gt;</c>; <c>TemplateValues</c> holds template values (Cardinality,
+/// time_type, …); <c>BoundOperand</c> is filled by the parser from the IdentCon→NameCon(operand)
+/// wire. Call parts carry the invoked block in <c>CalledBlock</c>/<c>CallBlockType</c> and its
+/// instance DB in <c>Instance</c>.
 /// </summary>
 internal sealed class PartNode
 {
@@ -30,9 +33,19 @@ internal sealed class PartNode
     public required string Name { get; init; }
     public string? Version { get; init; }
     public string? Instance { get; init; }
+    /// <summary>CallInfo@Name — the block a Call part invokes (FB_CylManual, FC10, …).</summary>
+    public string? CalledBlock { get; init; }
+    /// <summary>CallInfo@BlockType — FB / FC / SFB …</summary>
+    public string? CallBlockType { get; init; }
     public required HashSet<string> Negated { get; init; }
     public required Dictionary<string, string> TemplateValues { get; init; }
     public string? BoundOperand { get; set; }
+
+    /// <summary>Display form for DTO surfaces: Calls show the invoked block ("Call:FB_CylManual"),
+    /// everything else shows its own name.</summary>
+    public string DisplayName => Name == "Call" && !string.IsNullOrEmpty(CalledBlock)
+        ? $"Call:{CalledBlock}"
+        : Name;
 }
 
 /// <summary>One wire: a source endpoint plus every target endpoint it feeds. Child order in the XML

@@ -158,14 +158,14 @@ public static class SimaticMlCodeReader
         model.Parts.Values
             .Where(p => LadPartCatalog.Timers.Contains(p.Name) || LadPartCatalog.Boxes.Contains(p.Name))
             .OrderBy(p => p.UId)
-            .Select(p => new NetworkBox(p.Name, p.Instance, FlgNetParser.BindPins(model, p)))
+            .Select(p => new NetworkBox(p.DisplayName, p.Instance, FlgNetParser.BindPins(model, p)))
             .ToList();
 
     private static NetworkFallback BuildFallback(FlgNetModel model, string reason)
     {
         const int cap = 200;
         var parts = model.Parts.Values.OrderBy(p => p.UId).Take(cap).Select(p => new FallbackPart(
-            p.UId, p.Name, p.BoundOperand, p.Instance, p.Negated.ToArray())).ToList();
+            p.UId, p.DisplayName, p.BoundOperand, p.Instance, p.Negated.ToArray())).ToList();
         if (model.Parts.Count > cap)
         {
             parts.Add(new FallbackPart(0, $"…+{model.Parts.Count - cap} more parts", null, null, Array.Empty<string>()));

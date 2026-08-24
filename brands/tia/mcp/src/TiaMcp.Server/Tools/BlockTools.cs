@@ -75,11 +75,53 @@ public sealed class BlockTools
     [McpServerTool(Name = "tia_cross_reference")]
     [Description(
         "Cross-references for a block: what it uses and where it is used, each with reference type " +
-        "(Uses/UsedBy/…) and access (Read/Write/Call/…). Read-only. Use to understand impact before editing.")]
-    public Task<object> TiaCrossReferenceAsync(
+        "(Uses/UsedBy/…) and access (Read/Write/Call/…). Read-only. Use to understand impact before editing. " +
+        "aggregate=true collapses each entry's per-access locations into counts (much smaller response — " +
+        "the full form lists one location per single access); limit caps the number of reference entries " +
+        "returned (total stays in count; truncated=true when clipped) — use both on large callers.")]
+    public async Task<object> TiaCrossReferenceAsync(
         [Description("Block path, e.g. .../plc:program/block:OP10_Valve.")] string path,
-        CancellationToken ct = default) =>
-        ToolErrors.InvokeAsync(() => _backend.GetCrossReferencesAsync(path, ct));
+        [Description("Collapse each entry's locations into per referenceType/access counts (default false = full list).")]
+        bool aggregate = false,
+        [Description("Cap on reference entries returned (default = all). When clipping, count holds the total and truncated=true.")]
+        int? limit = null,
+        CancellationToken ct = default)
+    {
+        var result = await ToolErrors.InvokeAsync(() => _backend.GetCrossReferencesAsync(path, ct))
+            .ConfigureAwait(false);
+        if (result is not CrossRefResult xref)
+        {
+            return result; // ToolError passthrough
+        }
+
+        var entries = xref.References;
+        var truncated = false;
+        if (limit is > 0 && entries.Count > limit.Value)
+        {
+            entries = entries.Take(limit.Value).ToList();
+            truncated = true;
+        }
+
+        if (!aggregate)
+        {
+            return new { xref.Path, xref.Count, truncated, references = entries };
+        }
+
+        // Aggregate: one count per (referenceType, access) pair per entry — the "who/how many" view
+        // without per-access location noise (a hot caller block can repeat the same access dozens of times).
+        var slim = entries.Select(e => new
+        {
+            e.Name,
+            e.Path,
+            e.TypeName,
+            e.Address,
+            counts = e.Locations
+                .GroupBy(l => (l.ReferenceType, l.Access))
+                .OrderByDescending(g => g.Count())
+                .ToDictionary(g => $"{g.Key.ReferenceType}/{g.Key.Access}", g => g.Count()),
+        }).ToList();
+        return new { xref.Path, xref.Count, truncated, references = slim };
+    }
 
     [McpServerTool(Name = "tia_block_export")]
     [Description("Export a block (or a UDT/PLC data type) to a file (SclSource = .scl text [blocks only], Xml = SimaticML). UDTs resolve by the same name and export as Xml. Returns the absolute file path written.")]
@@ -138,7 +180,9 @@ public sealed class BlockTools
     [McpServerTool(Name = "tia_block_delete")]
     [Description(
         "Delete a block (destructive; needs --mode ReadWrite AND confirm=true). " +
-        "Without confirm it returns a preview and does nothing.")]
+        "Without confirm it returns a preview and does nothing. Preview AND result report the block's " +
+        "dependents (who calls it, which instance DBs type it) from cross-references, so a delete that " +
+        "would break callers is visible before confirming.")]
     public async Task<MutationResult> TiaBlockDeleteAsync(
         [Description("Block path to delete.")]
         string path,
@@ -150,22 +194,55 @@ public sealed class BlockTools
         var decision = _guard.Check(op, confirm);
         if (!decision.Allow)
         {
-            return decision.NeedsConfirm
-                ? MutationResult.Awaiting(op, $"Delete block at '{path}'.",
-                    "Re-call tia_block_delete with confirm=true to proceed.")
-                : MutationResult.Denied(op, decision.DenyReason!);
+            if (!decision.NeedsConfirm)
+            {
+                return MutationResult.Denied(op, decision.DenyReason!);
+            }
+
+            var (dependents, usedTypes) = await DescribeDeleteImpactAsync(path, ct).ConfigureAwait(false);
+            return MutationResult.Awaiting(op,
+                $"Delete block at '{path}'." + XrefImpact.DependentsSuffix(dependents, usedTypes, orphansNow: false),
+                "Re-call tia_block_delete with confirm=true to proceed.", dependents);
         }
 
         try
         {
+            // Gather dependents BEFORE deleting — after deletion the cross-references are gone.
+            var (dependents, usedTypes) = await DescribeDeleteImpactAsync(path, ct).ConfigureAwait(false);
             await _backend.DeleteBlockAsync(path, ct);
-            _audit.Append(op, path, success: true);
-            return MutationResult.Applied(op, $"Deleted block '{path}'.");
+            _audit.Append(op, path, success: true, details: dependents.Count > 0 ? string.Join("; ", dependents) : null);
+            return MutationResult.Applied(
+                op, $"Deleted block '{path}'." + XrefImpact.DependentsSuffix(dependents, usedTypes, orphansNow: true),
+                dependents);
         }
         catch (Exception ex)
         {
             _audit.Append(op, path, success: false, error: ex.Message);
             return MutationResult.Failed(op, ex.Message);
+        }
+    }
+
+    /// <summary>Deletion impact from the block's cross-references: direct dependents (what a delete
+    /// BREAKS — see <see cref="XrefImpact"/>) plus the user PLC data types it declares with
+    /// (Uses/Declaration into 'PLC data types' — what a delete may ORPHAN).</summary>
+    private async Task<(List<string> Dependents, List<string> UsedTypes)> DescribeDeleteImpactAsync(
+        string path, CancellationToken ct)
+    {
+        try
+        {
+            var xref = await _backend.GetCrossReferencesAsync(path, ct).ConfigureAwait(false);
+            var usedTypes = xref.References
+                .Where(e => e.Path is not null
+                            && e.Path.Contains("PLC data types")
+                            && !e.Path.Contains("System data types")
+                            && e.Locations.Any(l => l.ReferenceType == "Uses" && l.Access == "Declaration"))
+                .Select(e => e.Name)
+                .ToList();
+            return (XrefImpact.ExtractDependents(xref), usedTypes);
+        }
+        catch
+        {
+            return (new List<string>(), new List<string>());
         }
     }
 }

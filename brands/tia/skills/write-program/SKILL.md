@@ -37,6 +37,7 @@ description: "给 PLC 建变量(tags)、数据类型(UDT)、逻辑块(OB/FB/FC,�
 
 `tia_block_generate_from_source(plcPath, sourceName, sourceText)`:直接喂 **SCL 文本**(`FUNCTION` / `FUNCTION_BLOCK …`),走 ExternalSources 生成真实块(如生成一个带自保持的电机控制块)。新建/简单逻辑用这条。
 - **定时器/计数器/状态机也走这条**:IEC 定时器声明为 `TON_TIME`(FB 放 Static),`#t(IN:=…, PT:=T#3S)` 调用、读 `#t.Q`。比手写 LAD 定时器可靠得多 —— 见 [`定时器范例`](examples/定时器范例.md)(已实测 0 错误)。
+- **OB 与背景 DB 也能走 SCL 源**(真机实测 2026-08-23):`ORGANIZATION_BLOCK "Main" … BEGIN … END_ORGANIZATION_BLOCK`(SCL 的 OB1,可直接带形参调用 FB——比在 LAD OB 里手写 Call 轻松得多)、`DATA_BLOCK "DB_X" … : FB_Name; BEGIN END_DATA_BLOCK`(背景 DB)。一个源文件可含多个声明;⚠️ 一处语法错会级联污染后续所有块的报错,排查时先隔离可疑声明。
 
 ### 路径 B —— SimaticML(LAD / GRAPH,或需要精确控制结构时)
 
@@ -50,10 +51,11 @@ description: "给 PLC 建变量(tags)、数据类型(UDT)、逻辑块(OB/FB/FC,�
 
 ### 路径 C —— 结构化读写(LAD + GRAPH,免手写 XML)
 
-- **读**:`tia_block_read_code(path)` —— LAD 网络直接回**布尔表达式 + 线圈 + 盒清单**(如 `(Start_PB OR Motor) AND NOT Stop_PB = ( ) Motor`),SCL 块回拍平文本,**GRAPH 块回步/转移/动作结构化视图**(步名/初始步/N-R-S 动作/转移条件/每步监控联锁条件)。纯布尔网络还带 `logic` 表达式树(**与写 spec 同形**,读→改→写回闭环)。带 `networkFrom/networkTo` 翻页,`includeInterface=false` 只看本体。解析不了的网络回退结构化清单,不会给错误表达式。
+- **读**:`tia_block_read_code(path)` —— LAD 网络直接回**布尔表达式 + 线圈 + 盒清单**(如 `(Start_PB OR Motor) AND NOT Stop_PB = ( ) Motor`),SCL 块回拍平文本,**GRAPH 块回步/转移/动作结构化视图**(步名/初始步/N-R-S 动作/转移条件/每步监控联锁条件;闭环顺控带 `loop: true`——与写 spec 同形,读→改→写回不丢环)。纯布尔网络还带 `logic` 表达式树(**与写 spec 同形**,读→改→写回闭环)。带 `networkFrom/networkTo` 翻页,`includeInterface=false` 只看本体。解析不了的网络回退结构化清单,不会给错误表达式。
 - **写**:`tia_block_write_code(plcPath, specJson)` —— 结构化 JSON spec 直接生成 SimaticML 并导入(Override 幂等)。
   - **LAD** v1 指令集:触点(NO/NC)、and/or 嵌套、coil/set/reset、TON/TOF/TP(多重实例+PT,FB)、MOVE、内联比较 eq/ne/ge/gt/le/lt。
   - **GRAPH**:线性序列 `sequence: [{name, actions:[{qualifier, operand}], transitionOperand}]`(限定符 N/R/S/D/L/ON/OFF/TD/TF/TL/CD/CR/CS/CU;**已在真机验证导入+编译 0 错**;首个非标准 Input 成员兼作每步必备的监控/联锁条件;复杂拓扑用路径 B 模板法)。
+  - **GRAPH 循环**:spec 加 `"loop": true` —— 尾转移以 **Jump 连接回初始步**(真机验证导入+编译 0 错+导出往返;2026-08-23)。⚠️ 每步**至多 1 个动作**(TIA V21 XML 导入上限,多动作必报错——多驱动的操作数放调用 OB 里合并,或拆成独立步)。
   - `dryRun=true` 只返回生成的 XML 不导入(ReadOnly 也可用)。spec 里的操作数:接口里声明过的按局部变量,否则按全局 tag(先 `tia_tag_create`);数值字面量直接写(`8.0`、`T#3S`)。
 - 超出指令集(边沿触点、CTU、Call 带形参、GRAPH 并行/分支等)→ 报错并提示改走路径 B 模板法。
 
@@ -82,8 +84,12 @@ description: "给 PLC 建变量(tags)、数据类型(UDT)、逻辑块(OB/FB/FC,�
 | import 报 XML 不合法 | `source` 要 SimaticML XML 非 SCL;先 `[xml]$x=Get-Content` 校验良构 |
 | import 报 `Missing 'Namespace'` | 块的 `<AttributeList>` 漏了 `<Namespace />`(FC/FB/OB/UDT 都要) |
 | write_code 报"不在 v1 指令集" | 边沿触点/CTU/Call 带形参等暂不支持结构化写入;改走路径 B 模板法 |
+| import 报 `culture 'zh-CN' does not exist` / 中文注释静默丢失 | 项目语言库没有该 culture。XML 注释一律用 **en-US culture + 中文文本**(显示正常;真机实测 22 个中文注释全落盘);tag 表 import 会显式报错,块 import 会**静默剥离** zh-CN |
+| GRAPH 报 "action table … line break" / "NewLine not supported" | 每步多动作超出 TIA V21 XML 导入上限(write_code 已内置校验;手写 XML 同样别试);多驱动的操作数放调用 OB 合并 |
+| GRAPH 引 `EN_SQ` 编译报 not defined | GRAPH 运行时接口**没有** EN_SQ;序列/步状态用背景 DB 里步实例的 `.X`(步激活标志,如 `"DB_Auto".StpA.X`),全 0 = 序列到 End |
 | UDT import 报 TargetInvocation / `'X' attribute is not declared` | 多个 schema 坑;完整列表见 SimaticML速查「UDT」节(最稳:导出模板改) |
-| 块编译过但"不运行" | 没在循环 OB 里调用它 |
+| generate_from_source 报 `Syntax error: The specified value "Bool" is invalid`(行号指向成员声明) | SCL `DATA_BLOCK` 里 `NON_RETAIN` 与成员声明混用 codegen 不认(真机实测 2026-08-24)。**空 DB 用** `DATA_BLOCK "X" { S7_Optimized_Access := 'TRUE' } VERSION : 0.1 NON_RETAIN ␣␣(空行)␣␣ BEGIN END_DATA_BLOCK`;要成员就去掉 `NON_RETAIN`,或干脆建块后用 XML 路线 |
+| 块编译过但"不运行" | 没在循环 OB 里调用它(SCL OB1 里 `"DB_X"(参数:=…)` 文本调用即可) |
 | StructuredText 报 "UId 缺失" | v4 命名空间每个元素都要 UId(含 Symbol/Component),见速查 |
 | 创建项目报路径过长 | TIA 项目路径上限 143 字符,换浅一点的目录(如 `C:\TiaTmp`) |
 | `tia_catalog_search` 输出爆掉(100k+ 字符) | 查询要给具体订货号/型号(如 `6ES7 511-1AK02`),别用宽泛词 |

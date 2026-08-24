@@ -15,15 +15,36 @@ and an `_error` payload will fail the assertion naturally.
 
 
 class Client:
-    def __init__(self, dll, backend="fake", mode="ReadOnly", client_name="smoke"):
+    def __init__(self, dll, backend="fake", mode="ReadOnly", client_name="smoke", stderr_path=None):
+        import queue
         import subprocess
+        import threading
+        # stderr (server diagnostics + relayed worker Console.Error) is normally discarded; pass a
+        # path to keep it for live-Portal debugging — attach hangs and Openness errors land there.
+        self._stderr_path = stderr_path
+        self.err = open(stderr_path, "w", encoding="utf-8", errors="replace") if stderr_path else subprocess.DEVNULL
         self.p = subprocess.Popen(
             ["dotnet", dll, "--backend", backend, "--mode", mode],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.err,
             text=True, encoding="utf-8")
         self._client_name = client_name
         self._next = 1
         self._buf = {}
+        # Reader thread: readline() blocks until a line arrives, so a silent server would block
+        # _wait() forever and its timeout would never fire. The thread pushes parsed responses
+        # into a queue; _wait() polls the queue with the remaining budget instead.
+        self._q = queue.Queue()
+        threading.Thread(target=self._reader, daemon=True).start()
+
+    def _reader(self):
+        import json
+        for raw in self.p.stdout:
+            try:
+                msg = json.loads(raw)
+            except ValueError:
+                continue  # stray non-JSON line (noise), skip
+            if "id" in msg:
+                self._q.put(msg)
 
     def _send(self, method, params=None, notification=False):
         import json
@@ -41,18 +62,20 @@ class Client:
         return obj.get("id")
 
     def _wait(self, ids, timeout=60.0):
-        import json
+        import queue
         import time
         deadline = time.time() + timeout
         while any(i not in self._buf for i in ids):
-            if time.time() > deadline:
+            remaining = deadline - time.time()
+            if remaining <= 0:
                 raise TimeoutError(f"missing ids {[i for i in ids if i not in self._buf]}")
-            raw = self.p.stdout.readline()
-            if not raw:
-                raise RuntimeError("server closed stdout unexpectedly")
-            msg = json.loads(raw.strip())
-            if "id" in msg:
-                self._buf[msg["id"]] = msg
+            try:
+                msg = self._q.get(timeout=min(remaining, 0.5))
+            except queue.Empty:
+                if self.p.poll() is not None:
+                    raise RuntimeError("server exited unexpectedly")
+                continue
+            self._buf[msg["id"]] = msg
         return {i: self._buf[i] for i in ids}
 
     def initialize(self):
@@ -89,6 +112,20 @@ class Client:
                 self.p.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 self.p.kill()
+            try:
+                self.err.close()
+            except Exception:
+                pass
+
+    def stderr_text(self):
+        """Captured server/worker stderr so far (empty unless stderr_path was given)."""
+        if not self._stderr_path:
+            return ""
+        try:
+            with open(self._stderr_path, encoding="utf-8", errors="replace") as f:
+                return f.read()
+        except Exception:
+            return ""
 
 
 def paths(session):

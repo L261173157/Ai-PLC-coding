@@ -142,9 +142,33 @@ public sealed class OpennessEngine : ITiaBackend, IDisposable
     public Task<ProjectInfo> OpenProjectAsync(string sessionPath, OpenProjectRequest request, CancellationToken ct)
     {
         EnsurePortal(new ConnectRequest(request.Visible ? "interactive" : "headless"));
-        // Open takes a FileInfo of the .ap1x project FILE (not a directory). It rejects relative
-        // paths, so normalize against the worker's CWD (an agent may pass a relative path).
-        var project = _portal!.Projects.Open(new FileInfo(Path.GetFullPath(request.Path)));
+
+        Project project;
+        if (Path.GetExtension(request.Path).StartsWith(".ap", StringComparison.OrdinalIgnoreCase))
+        {
+            // Open takes a FileInfo of the .ap1x project FILE (not a directory). It rejects relative
+            // paths, so normalize against the worker's CWD (an agent may pass a relative path);
+            // pre-check existence so a typo yields our error, not TIA's vague Open() failure.
+            var fullPath = Path.GetFullPath(request.Path);
+            if (!File.Exists(fullPath))
+            {
+                throw NotFound("project file", fullPath);
+            }
+            project = _portal!.Projects.Open(new FileInfo(fullPath));
+        }
+        else
+        {
+            // Bare project NAME: match a project already open in this Portal (the attach case)
+            // instead of treating it as a filesystem path and failing with a misleading
+            // 'file not found'.
+            project = _portal!.Projects.FirstOrDefault(p =>
+                          string.Equals(p.Name, request.Path, StringComparison.OrdinalIgnoreCase))
+                      ?? throw new FileNotFoundException(
+                          "No project named '" + request.Path + "' is open in this Portal, and no .ap1x " +
+                          "path was given. Pass the full path to the .ap21 file to open a project, or the " +
+                          "name of one already open.");
+        }
+
         _openProjects[project.Name] = project;
         return Task.FromResult(new ProjectInfo(
             project.Name, SessionRoot + "/project:" + project.Name, "TiaMcp", TiaVersion));
@@ -196,6 +220,13 @@ public sealed class OpennessEngine : ITiaBackend, IDisposable
             return Task.FromResult(LifecycleResult("save_project_as", reopened));
         }
 
+        // SaveAs MOVES the project object: its Path now points at the copy. Keeping the stale
+        // handle registered under the old name makes every later op (save/archive/status) act on
+        // the CLONE while reporting the old name, and holds the copy's directory lock open so a
+        // second Portal cannot open it ("already been opened by user …"). Drop the handle and
+        // close it — the documented clean route is to explicitly open source/copy afterwards.
+        _openProjects.Remove(project.Name);
+        project.Close();
         var result = LifecycleResult("save_project_as", project);
         return Task.FromResult(result with { ProjectPath = copiedPath ?? copyDir });
     }
@@ -251,8 +282,18 @@ public sealed class OpennessEngine : ITiaBackend, IDisposable
         {
             project.Save();
         }
+        // Live-verified 2026-08-23: TIA's Archive writes the file under EXACTLY this name — no
+        // extension is appended — so a bare name lands as an extension-less file. Pin .zap1x.
+        if (!archiveName.EndsWith(".zap1x", StringComparison.OrdinalIgnoreCase))
+        {
+            archiveName += ".zap1x";
+        }
         project.Archive(new DirectoryInfo(archiveDirectory), archiveName, MapArchiveMode(mode));
-        return Task.FromResult(LifecycleResult("archive_project", project));
+        var result = LifecycleResult("archive_project", project);
+        return Task.FromResult(result with
+        {
+            ProjectPath = Path.Combine(Path.GetFullPath(archiveDirectory), archiveName),
+        });
     }
 
     public Task<ProjectLifecycleResult> CloseProjectAsync(string projectPath, bool saveBeforeClose, CancellationToken ct)
@@ -471,7 +512,7 @@ public sealed class OpennessEngine : ITiaBackend, IDisposable
 
         var dir = string.IsNullOrWhiteSpace(outDir)
             ? Path.Combine(Path.GetTempPath(), "tiamcp-export")
-            : outDir;
+            : Path.GetFullPath(outDir); // worker CWD is its own bin folder; TIA Export rejects relative paths
         Directory.CreateDirectory(dir);
         // Siemens' Export/GenerateSource both REFUSE to overwrite an existing file (they throw rather
         // than replace). Clear any stale file from a previous run so re-export is idempotent.
@@ -617,7 +658,13 @@ public sealed class OpennessEngine : ITiaBackend, IDisposable
         PlcTagTable table;
         if (!string.IsNullOrEmpty(tableName))
         {
-            table = software.TagTableGroup.TagTables.Find(tableName)
+            // Live-verified 2026-08-23: real projects name the default table "Default tag table"
+            // (the Fake backend's is just "Default"), so accept the short alias for the default
+            // table instead of forcing callers to spell the display name in the path segment.
+            table = FindTagTable(software.TagTableGroup, tableName!)
+                    ?? (tableName!.Equals("Default", StringComparison.OrdinalIgnoreCase)
+                        ? FindTagTable(software.TagTableGroup, "Default tag table")
+                        : null)
                     ?? throw NotFound("tag table", tagTablePath);
         }
         else
@@ -630,7 +677,11 @@ public sealed class OpennessEngine : ITiaBackend, IDisposable
         var dataType = string.IsNullOrWhiteSpace(request.DataType) ? "Bool" : request.DataType;
         var address = request.Address ?? string.Empty;
         // Create(name, dataTypeName, address); empty address => auto.
-        table.Tags.Create(request.Name, dataType, address);
+        var tag = table.Tags.Create(request.Name, dataType, address);
+        // Live-verified 2026-08-23: the comment parameter used to be silently dropped — new tags
+        // carry one empty MultilingualTextItem per project language, so setting text = picking
+        // the en-US item (fallback: first item) and assigning .Text.
+        SetMultilingualText(tag.Comment, request.Comment);
         return Task.FromResult(PlcPathFor(tagTablePath) + "/tagtable:" + table.Name + "/tag:" + request.Name);
     }
 
@@ -1099,12 +1150,28 @@ public sealed class OpennessEngine : ITiaBackend, IDisposable
 
     public Task<CrossRefResult> GetCrossReferencesAsync(string path, CancellationToken ct)
     {
+        // Blocks AND tags carry the cross-reference service. A tag's where-used answers "which
+        // blocks read/write me" — exactly the dependency view a tag deletion needs to preview.
+        var entries = new List<XRefEntry>();
+        if (!string.IsNullOrEmpty(PathSegment(path, "tag")))
+        {
+            var software = ResolvePlcSoftware(path) ?? throw NotFound("PLC", path);
+            var tableName = PathSegment(path, "tagtable");
+            var table = string.IsNullOrEmpty(tableName)
+                ? null
+                : software.TagTableGroup.TagTables.Find(tableName);
+            var tag = table?.Tags.Find(PathSegment(path, "tag")) ?? throw NotFound("tag", path);
+            var tagSvc = tag.GetService<CrossReferenceService>()
+                         ?? throw new NotSupportedException("Cross-reference service unavailable for this tag.");
+            CollectXRefs(tagSvc.GetCrossReferences(CrossReferenceFilter.AllObjects).Sources, entries);
+            return Task.FromResult(new CrossRefResult(path, entries.Count, entries));
+        }
+
         var block = ResolveBlock(path) ?? throw NotFound("block", path);
         var svc = block.GetService<CrossReferenceService>()
                   ?? throw new NotSupportedException("Cross-reference service unavailable for this object.");
         var result = svc.GetCrossReferences(CrossReferenceFilter.AllObjects);
 
-        var entries = new List<XRefEntry>();
         CollectXRefs(result.Sources, entries);
         return Task.FromResult(new CrossRefResult(path, entries.Count, entries));
     }
@@ -1316,7 +1383,7 @@ public sealed class OpennessEngine : ITiaBackend, IDisposable
 
         var dir = string.IsNullOrWhiteSpace(outDir)
             ? Path.Combine(Path.GetTempPath(), "tiamcp-export")
-            : outDir;
+            : Path.GetFullPath(outDir); // worker CWD is its own bin folder; TIA Export rejects relative paths
         Directory.CreateDirectory(dir);
         // Siemens Export REFUSES to overwrite an existing file (throws); clear stale output so
         // re-export is idempotent (mirrors ExportBlockAsync).
@@ -1378,7 +1445,10 @@ public sealed class OpennessEngine : ITiaBackend, IDisposable
     {
         var software = ResolvePlcSoftware(plcPath) ?? throw NotFound("PLC", plcPath);
         var before = SnapshotTagTableNames(software);
-        var file = WriteTempXml("tagtable", sourceXml);
+        // sourceXml is either inline SimaticML XML, or a path to an existing .xml file on disk — same
+        // rule as block/UDT import (verified live 2026-08-23: passing a path used to fail with
+        // "Data at the root level is invalid" because the path was written to disk AS the XML).
+        var file = ResolveSourceFile(sourceXml) ?? WriteTempXml("tagtable", sourceXml);
         software.TagTableGroup.TagTables.Import(new FileInfo(file), ImportOptions.Override);
         var created = DiffNames(before, SnapshotTagTableNames(software));
         var plc = PlcPathFor(plcPath);
@@ -2152,11 +2222,37 @@ public sealed class OpennessEngine : ITiaBackend, IDisposable
 
     // ----- P7 helpers -----
 
+    /// <summary>Set the text of an Openness MultilingualText (tag/block comment): prefer the
+    /// en-US culture item, else the first item. New objects carry one empty item per project
+    /// language, so writing = picking the item and assigning <c>.Text</c> (live-verified pattern;
+    /// reading is the P3-notes verified <c>foreach (MultilingualTextItem it in x.Items)</c>).</summary>
+    private static void SetMultilingualText(MultilingualText? text, string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value) || text is null)
+        {
+            return;
+        }
+        MultilingualTextItem? first = null;
+        foreach (MultilingualTextItem it in text.Items)
+        {
+            first ??= it;
+            if (string.Equals(it.Language.Culture.Name, "en-US", StringComparison.OrdinalIgnoreCase))
+            {
+                first = it;
+                break;
+            }
+        }
+        if (first is not null)
+        {
+            first.Text = value;
+        }
+    }
+
     /// <summary>If <paramref name="source"/> is a path to an existing file (and not inline XML),
     /// return that path so the importer reads it directly; otherwise null (caller writes inline XML).</summary>
     private static string? ResolveSourceFile(string? source)
     {
-        if (string.IsNullOrWhiteSpace(source) || source.TrimStart().StartsWith("<")) return null;
+        if (source is null || source.TrimStart().StartsWith("<")) return null;
         return File.Exists(source) ? source : null;
     }
 

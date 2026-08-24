@@ -50,9 +50,33 @@ internal sealed class WorkerChannel : IDisposable
             {
                 var json = JsonSerializer.Serialize(req, Json);
                 await _stdin!.WriteLineAsync(json).ConfigureAwait(false);
-                await _stdin.FlushAsync(ct).ConfigureAwait(false);
 
-                var line = await _stdout!.ReadLineAsync(ct).ConfigureAwait(false);
+                // Per-op watchdog: a worker stuck in a native Siemens call (e.g. Attach() blocked
+                // by the Portal's Openness authorization dialog, or a modal dialog in the GUI)
+                // NEVER returns on its own — without a timeout the hang poisons the whole server:
+                // every later call queues on the IO lock and even other worker sessions die with
+                // it. On timeout the catch below kills the worker tree so the next call respawns.
+                var timeout = TimeoutFor(req.Op);
+                using var watchdog = new CancellationTokenSource(timeout);
+                using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, watchdog.Token);
+                await _stdin.FlushAsync(linked.Token).ConfigureAwait(false);
+
+                string? line;
+                try
+                {
+                    line = await _stdout!.ReadLineAsync(linked.Token).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+                {
+                    throw new TimeoutException(
+                        $"Openness worker did not respond to '{req.Op}' within {timeout.TotalSeconds:0}s. " +
+                        "The TIA Portal is probably blocked — most often the Openness authorization dialog " +
+                        "is waiting for a click (answer Yes/allow in the Portal GUI), or a modal dialog or " +
+                        "project lock is holding it. The stuck worker was killed and the next call respawns " +
+                        "a fresh one; any headless Portal it had spawned goes down too (unsaved changes lost). " +
+                        "Unattended recovery: reconnect with mode=headless, which never shows the dialog.");
+                }
+
                 if (line is null)
                 {
                     throw new IOException(
@@ -79,6 +103,19 @@ internal sealed class WorkerChannel : IDisposable
         }
     }
 
+    /// <summary>Per-op RPC deadline. The default covers normal reads/writes; slow-but-legitimate
+    /// operations on real TIA get headroom (compiling/downloading a whole PLC, archiving, saving,
+    /// spawning a headless Portal, generating blocks from external sources).</summary>
+    private static TimeSpan TimeoutFor(string op) => op switch
+    {
+        RpcOp.Compile or RpcOp.Download or RpcOp.ArchiveProject => TimeSpan.FromMinutes(15),
+        RpcOp.Connect or RpcOp.OpenProject or RpcOp.CreateProject or RpcOp.SaveProject
+            or RpcOp.SaveProjectAs or RpcOp.GenerateBlocksFromSource or RpcOp.ImportUdt
+            or RpcOp.ImportTagTable or RpcOp.ImportBlock or RpcOp.CreateBlockFromCopy
+            => TimeSpan.FromMinutes(5),
+        _ => TimeSpan.FromMinutes(2),
+    };
+
     public void Dispose() => TearDownProcess();
 
     private void TearDownProcess()
@@ -89,7 +126,10 @@ internal sealed class WorkerChannel : IDisposable
         {
             if (_process is { HasExited: false })
             {
-                _process.Kill();
+                // Kill the TREE, not just the exe: a worker that spawned a headless TIA Portal owns
+                // it as a child, and an orphaned Portal (~2 GB) survives a bare Kill. Attach-mode
+                // Portals (the user's GUI) are NOT children, so they are untouched.
+                _process.Kill(entireProcessTree: true);
             }
         }
         catch { /* ignore */ }

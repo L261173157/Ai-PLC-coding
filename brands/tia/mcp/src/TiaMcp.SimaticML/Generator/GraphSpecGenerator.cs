@@ -68,6 +68,18 @@ public static partial class GraphSpecGenerator
                 throw new ArgumentException($"sequence[{i}].name '{step.Name}' is not unique.");
             }
 
+            // Live-verified 2026-08-23: TIA V21 XML import rejects multi-action steps no matter the
+            // shape ("action table … line break" for parallel Actions, "NewLine not supported"
+            // for line separators, value-invalid on multi-token) — one action per step is the
+            // ceiling. Fail fast with the workaround instead of a cryptic TIA import error.
+            if ((step.Actions?.Count ?? 0) > 1)
+            {
+                throw new ArgumentException(
+                    $"sequence[{i}] ('{step.Name}') has {step.Actions!.Count} actions — TIA V21 XML import " +
+                    "supports at most ONE action per step. Split the extra actions into their own steps, " +
+                    "or drive the second operand from the calling OB instead.");
+            }
+
             foreach (var a in step.Actions ?? Array.Empty<GraphActionSpec>())
             {
                 if (string.IsNullOrEmpty(a?.Operand))
@@ -95,18 +107,34 @@ public static partial class GraphSpecGenerator
                 "doubles as the mandatory supervision/interlock condition.");
 
         var graph = BuildGraph(spec, sequence, locals, conditionOperand, locals);
+        var objectList = new XElement("ObjectList");
+        // Block comment first (matches export order); ID 1000 stays clear of the CompileUnit ID.
+        // Live-verified 2026-08-23: cultures absent from the project are silently stripped on
+        // import, so comments pin en-US (Chinese text inside en-US survives fine).
+        if (!string.IsNullOrEmpty(spec.Comment))
+        {
+            objectList.Add(new XElement("MultilingualText",
+                new XAttribute("ID", 1000), new XAttribute("CompositionName", "Comment"),
+                new XElement("ObjectList",
+                    new XElement("MultilingualTextItem",
+                        new XAttribute("ID", 1001), new XAttribute("CompositionName", "Items"),
+                        new XElement("AttributeList",
+                            new XElement("Culture", "en-US"),
+                            new XElement("Text", spec.Comment!))))));
+        }
+
+        objectList.Add(new XElement("SW.Blocks.CompileUnit",
+            new XAttribute("ID", 1), new XAttribute("CompositionName", "CompileUnits"),
+            new XElement("AttributeList",
+                new XElement("NetworkSource", graph),
+                new XElement("ProgrammingLanguage", "GRAPH"))));
         var doc = new XDocument(
             new XDeclaration("1.0", "utf-8", null),
             new XElement("Document",
                 new XElement("Engineering", new XAttribute("version", "V21")),
                 new XElement("SW.Blocks.FB", new XAttribute("ID", 0),
                     BuildAttributeList(spec),
-                    new XElement("ObjectList",
-                        new XElement("SW.Blocks.CompileUnit",
-                            new XAttribute("ID", 1), new XAttribute("CompositionName", "CompileUnits"),
-                            new XElement("AttributeList",
-                                new XElement("NetworkSource", graph),
-                                new XElement("ProgrammingLanguage", "GRAPH")))))));
+                    objectList)));
         var xml = doc.ToString();
         LintGenerated.Lint(xml);
         return xml;
@@ -171,8 +199,10 @@ public static partial class GraphSpecGenerator
         var el = new XElement("Member", new XAttribute("Name", m.Name ?? ""), new XAttribute("Datatype", m.Datatype ?? ""));
         if (!string.IsNullOrEmpty(m.Comment))
         {
+            // en-US, not zh-CN: cultures missing from the project are silently stripped on import
+            // (live-verified 2026-08-23) — Chinese text inside en-US survives fine.
             el.Add(new XElement("Comment",
-                new XElement("MultiLanguageText", new XAttribute("Lang", "zh-CN"), m.Comment)));
+                new XElement("MultiLanguageText", new XAttribute("Lang", "en-US"), m.Comment)));
         }
 
         return el;
@@ -224,9 +254,19 @@ public static partial class GraphSpecGenerator
         }
 
         // The last transition terminates the sequence (its target was itself above only to keep
-        // the loop uniform); repoint the final NodeTo's CONTENT at the EndConnection terminator.
+        // the loop uniform); repoint the final NodeTo's CONTENT — either at the EndConnection
+        // terminator, or (spec.Loop) at the initial step via a Jump connection (machine-verified
+        // 2026-08-23: TransitionRef last -> StepRef 1 + LinkType Jump imports and compiles clean).
         var lastNodeTo = connsEl.Elements().Last().Element("NodeTo")!;
-        lastNodeTo.ReplaceNodes(new XElement("EndConnection"));
+        if (spec.Loop == true)
+        {
+            lastNodeTo.ReplaceNodes(new XElement("StepRef", new XAttribute("Number", stepNumbers[0])));
+            connsEl.Elements().Last().Element("LinkType")!.ReplaceNodes("Jump");
+        }
+        else
+        {
+            lastNodeTo.ReplaceNodes(new XElement("EndConnection"));
+        }
 
         return new XElement(XName.Get("Graph", GraphNs),
             new XElement("PreOperations"),

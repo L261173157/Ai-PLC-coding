@@ -9,98 +9,14 @@ Optional 2nd arg is a .ap1x project path; if given, it also opens it and lists d
 Usage:
     python mcp/tests/smoke_openness.py <path-to-server-dll> [path-to.ap21]   (run from the repo root)
 
-The worker + headless TIA Portal startup is slow (~30-90s on first launch), so request timeouts
-are generous (120s).
+The worker + headless TIA Portal startup is slow (~30-90s on first launch), so the slow calls
+(status / connect / project open) get generous explicit timeouts.
 """
-import json
-import subprocess
+import os
 import sys
-import time
+import tempfile
 
-
-class Client:
-    def __init__(self, dll, backend, mode):
-        import os
-        import tempfile
-        self.err_path = os.path.join(tempfile.gettempdir(), "tiamcp_openness_stderr.log")
-        self.err = open(self.err_path, "w", encoding="utf-8", errors="replace")
-        self.p = subprocess.Popen(
-            ["dotnet", dll, "--backend", backend, "--mode", mode],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.err,
-            text=True, encoding="utf-8")
-        self._next = 1
-        self._buf = {}
-
-    def _send(self, method, params=None, notification=False):
-        obj = {"jsonrpc": "2.0", "method": method}
-        if notification:
-            if params is not None:
-                obj["params"] = params
-        else:
-            obj["id"] = self._next
-            self._next += 1
-            if params is not None:
-                obj["params"] = params
-        self.p.stdin.write(json.dumps(obj) + "\n")
-        self.p.stdin.flush()
-        return obj.get("id")
-
-    def _wait(self, ids, timeout=120.0):
-        deadline = time.time() + timeout
-        while any(i not in self._buf for i in ids):
-            if time.time() > deadline:
-                raise TimeoutError(f"missing ids {[i for i in ids if i not in self._buf]}")
-            raw = self.p.stdout.readline()
-            if not raw:
-                raise RuntimeError("server closed stdout unexpectedly")
-            msg = json.loads(raw.strip())
-            if "id" in msg:
-                self._buf[msg["id"]] = msg
-        return {i: self._buf[i] for i in ids}
-
-    def initialize(self):
-        i1 = self._send("initialize", {"protocolVersion": "2024-11-05", "capabilities": {},
-                                       "clientInfo": {"name": "openness-smoke", "version": "0.1"}})
-        self._send("notifications/initialized", notification=True)
-        r = self._wait([i1])
-        return r[i1]["result"]
-
-    def call(self, name, args=None, timeout=120.0):
-        mid = self._send("tools/call", {"name": name, "arguments": args or {}})
-        r = self._wait([mid], timeout=timeout)[mid]
-        if "error" in r:
-            return {"_error": r["error"]}
-        res = r.get("result", {})
-        if res.get("isError"):
-            txt = res["content"][0].get("text", "") if res.get("content") else ""
-            return {"_error": txt or res}
-        if "content" in res:
-            txt = res["content"][0].get("text", "") if res["content"] else ""
-            try:
-                return json.loads(txt)
-            except Exception:
-                return {"_error": f"non-JSON content: {txt!r}", "_raw": res}
-        return res
-
-    def close(self):
-        try:
-            self.p.stdin.close()
-        finally:
-            try:
-                self.p.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                self.p.kill()
-            try:
-                self.err.close()
-            except Exception:
-                pass
-
-    def stderr_text(self):
-        try:
-            with open(self.err_path, encoding="utf-8", errors="replace") as f:
-                return f.read()
-        except Exception:
-            return ""
+from mcp_client import Client
 
 
 def main() -> int:
@@ -108,18 +24,19 @@ def main() -> int:
     project = sys.argv[2] if len(sys.argv) > 2 else None
 
     print("########## Openness backend (real TIA V21) ##########")
-    c = Client(dll, "openness", "ReadWrite")
+    err_path = os.path.join(tempfile.gettempdir(), "tiamcp_openness_stderr.log")
+    c = Client(dll, "openness", "ReadWrite", client_name="openness-smoke", stderr_path=err_path)
     try:
-        info = c.initialize()
-        print("  initialized:", info.get("serverInfo", {}).get("name"), info.get("protocolVersion"))
+        tools = c.initialize()
+        print(f"  initialized: {len(tools)} tools")
 
-        print("  tia_status  ... (first call spawns the net48 worker + headless TIA; ~30-90s)")
-        st = c.call("tia_status")
+        print("  tia_status  ... (first call spawns the net48 worker; ~30-90s)")
+        st = c.call("tia_status", timeout=120)
         print("    ->", st)
         assert st.get("tiaVersion") == "V21", f"expected V21, got {st.get('tiaVersion')}"
 
-        print("  tia_connect (headless) ...")
-        sess = c.call("tia_connect", {"mode": "headless"})
+        print("  tia_connect (headless) ... (spawns the headless TIA Portal; ~30-90s)")
+        sess = c.call("tia_connect", {"mode": "headless"}, timeout=300)
         print("    ->", sess)
         assert sess.get("sessionId") == "s-openness", f"connect failed: {sess}"
         session_path = sess["path"]
@@ -127,11 +44,12 @@ def main() -> int:
 
         if project:
             print(f"  tia_project_open {project} ...")
-            proj = c.call("tia_project_open", {"sessionPath": session_path, "path": project, "visible": False})
+            proj = c.call("tia_project_open", {"sessionPath": session_path, "path": project, "visible": False},
+                          timeout=300)
             print("    ->", proj)
             proj_path = proj.get("path")
             if proj_path:
-                tgts = c.call("tia_project_list", {"projectPath": proj_path})
+                tgts = c.call("tia_project_list", {"projectPath": proj_path}, timeout=120)
                 for t in tgts:
                     print(f"    target: {t.get('name')}  kind={t.get('kind')}  type={t.get('typeIdentifier')}")
                 # pick the first programmable PLC (a CPU), not an IO/HMI station
@@ -141,14 +59,14 @@ def main() -> int:
                     print("       Add an S7-1200 or S7-1500 CPU (not an ET200MP station / HMI), save, close.")
                 else:
                     plc = plc_tgt["path"] + "/plc:program"
-                    blocks = c.call("tia_block_list", {"path": plc, "limit": 100})
+                    blocks = c.call("tia_block_list", {"path": plc, "limit": 100}, timeout=120)
                     names = [b.get("name") for b in blocks.get("blocks", [])]
                     print("    blocks:", blocks.get("total"), names[:20])
 
                     # read the source of the first block
                     if names:
                         bp = plc + "/block:" + names[0]
-                        src = c.call("tia_block_read_source", {"path": bp})
+                        src = c.call("tia_block_read_source", {"path": bp}, timeout=120)
                         if isinstance(src, dict) and "_error" in src:
                             print("    read_source:", src["_error"])
                         else:
@@ -159,7 +77,7 @@ def main() -> int:
                             print("      ..." if (text or "").count("\n") >= 20 else "")
 
                     # compile the PLC software
-                    comp = c.call("tia_project_compile", {"scopePath": plc, "mode": "Software"})
+                    comp = c.call("tia_project_compile", {"scopePath": plc, "mode": "Software"}, timeout=300)
                     if isinstance(comp, dict) and "_error" in comp:
                         print("    compile:", comp["_error"])
                     else:

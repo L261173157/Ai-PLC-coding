@@ -91,7 +91,11 @@ public sealed class TagTools
     }
 
     [McpServerTool(Name = "tia_tag_delete")]
-    [Description("Delete a PLC tag (destructive; needs --mode ReadWrite AND confirm=true). Without confirm it returns a preview.")]
+    [Description(
+        "Delete a PLC tag (destructive; needs --mode ReadWrite AND confirm=true). " +
+        "Without confirm it returns a preview. Preview AND result report the tag's dependents " +
+        "(blocks that read/write it) from cross-references, so a delete that would break block " +
+        "logic is visible before confirming.")]
     public async Task<MutationResult> TiaTagDeleteAsync(
         [Description("Tag path to delete, e.g. .../tagtable:Default/tag:Valve_Open.")]
         string path,
@@ -102,17 +106,25 @@ public sealed class TagTools
         var decision = _guard.Check(op, confirm);
         if (!decision.Allow)
         {
-            return decision.NeedsConfirm
-                ? MutationResult.Awaiting(op, $"Delete tag at '{path}'.",
-                    "Re-call tia_tag_delete with confirm=true to proceed.")
-                : MutationResult.Denied(op, decision.DenyReason!);
+            if (!decision.NeedsConfirm)
+            {
+                return MutationResult.Denied(op, decision.DenyReason!);
+            }
+
+            var deps = await XrefImpact.DependentsOfAsync(_backend, path, ct).ConfigureAwait(false);
+            return MutationResult.Awaiting(op,
+                $"Delete tag at '{path}'." + XrefImpact.DependentsSuffix(deps, null, orphansNow: false),
+                "Re-call tia_tag_delete with confirm=true to proceed.", deps);
         }
 
         try
         {
+            // Gather dependents BEFORE deleting — after deletion the cross-references are gone.
+            var deps = await XrefImpact.DependentsOfAsync(_backend, path, ct).ConfigureAwait(false);
             await _backend.DeleteTagAsync(path, ct);
-            _audit.Append(op, path, success: true);
-            return MutationResult.Applied(op, $"Deleted tag '{path}'.");
+            _audit.Append(op, path, success: true, details: deps.Count > 0 ? string.Join("; ", deps) : null);
+            return MutationResult.Applied(
+                op, $"Deleted tag '{path}'." + XrefImpact.DependentsSuffix(deps, null, orphansNow: true), deps);
         }
         catch (Exception ex)
         {

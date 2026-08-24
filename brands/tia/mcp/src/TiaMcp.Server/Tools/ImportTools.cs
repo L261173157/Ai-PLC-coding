@@ -40,22 +40,25 @@ public sealed class ImportTools
     public Task<MutationResult> TiaTagTableImportAsync(
         [Description("PLC scope path, e.g. .../device:PLC_1/plc:program.")]
         string plcPath,
-        [Description("Full SimaticML XML of the tag table (SW.Tags.PlcTagTable).")]
+        [Description("Full SimaticML XML of the tag table (SW.Tags.PlcTagTable), OR an absolute path to an existing .xml file on disk (e.g. a prior tia_tagtable_export) to import directly without inlining the content.")]
         string sourceXml,
         CancellationToken ct = default) =>
         RunImportAsync(TiaOps.ImportTagTable, plcPath, () => _backend.ImportTagTableAsync(plcPath, sourceXml, ct), "tag-table import");
 
     [McpServerTool(Name = "tia_block_generate_from_source")]
     [Description(
-        "Generate program blocks from external source text (e.g. SCL/AWL) into a PLC via the " +
-        "ExternalSources path (write; needs --mode ReadWrite). Unlike tia_block_import (which takes " +
-        "SimaticML XML), this accepts raw source text. Returns the blocks that were created.")]
+        "Generate program blocks from EXTERNAL SOURCE TEXT — raw SCL/AWL code such as " +
+        "FUNCTION_BLOCK/FUNCTION/DATA_BLOCK/ORGANIZATION_BLOCK declarations (write; needs --mode " +
+        "ReadWrite). ⚠ Pick by INPUT TYPE, not by 'writing a block': SCL/AWL TEXT → this tool; a " +
+        "structured JSON spec (LAD networks / GRAPH sequence) → tia_block_write_code; SimaticML XML " +
+        "file/inline → tia_block_import. Also backs creation of SCL OBs and instance DBs " +
+        "('DATA_BLOCK \"X\" … : FB_Name;'). Returns the blocks that were created.")]
     public Task<MutationResult> TiaBlockGenerateFromSourceAsync(
         [Description("PLC scope path, e.g. .../device:PLC_1/plc:program.")]
         string plcPath,
         [Description("Source name (becomes the external-source object; add an extension like .scl/.awl, else .scl is assumed).")]
         string sourceName,
-        [Description("Full source text (e.g. one or more SCL FUNCTION_BLOCK/FUNCTION declarations).")]
+        [Description("Full SCL/AWL source text (e.g. one or more FUNCTION_BLOCK / FUNCTION / DATA_BLOCK / ORGANIZATION_BLOCK declarations). NOT a JSON spec and NOT SimaticML XML.")]
         string sourceText,
         CancellationToken ct = default) =>
         RunImportAsync(TiaOps.GenerateBlocks, plcPath,

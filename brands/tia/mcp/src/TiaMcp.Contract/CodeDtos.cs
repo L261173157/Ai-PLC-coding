@@ -59,11 +59,14 @@ public sealed record NetworkCode(
     NetworkFallback? Fallback,
     string? Text);
 
-/// <summary>GRAPH sequencer view: steps with actions, transitions with conditions.</summary>
+/// <summary>GRAPH sequencer view: steps with actions, transitions with conditions, and whether
+/// the sequence is closed (a Jump connection back to the initial step — the read-side mirror of
+/// the write spec's <c>loop: true</c>).</summary>
 public sealed record GraphCode(
     IReadOnlyList<GraphStep> Steps,
     IReadOnlyList<GraphTransition> Transitions,
-    string? FallbackNote);
+    string? FallbackNote,
+    bool Loop = false);
 
 /// <summary>One GRAPH step: actions (qualifier N/R/S/D/L/… + operand) and best-effort interlock /
 /// supervision expressions (rendered from their per-step FlgNet subnetworks).</summary>

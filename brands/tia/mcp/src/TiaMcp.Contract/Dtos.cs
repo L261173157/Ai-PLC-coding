@@ -106,21 +106,25 @@ public sealed record CreateBlockRequest(string PlcPath, string Name, BlockType T
 public sealed record CreateTagRequest(string TagTablePath, string Name, string Address, string DataType, string? Comment);
 
 // --- P2: mutation outcome (used by every write tool) ---
+/// <summary><c>Dependents</c> names what a destructive change breaks or leaves behind (e.g. callers and
+/// instance DBs of a deleted block, gathered from cross-references before the mutation). Null when not
+/// applicable; empty means "no dependents found".</summary>
 public sealed record MutationResult(
     MutationStatus Status,
     string Operation,
     string Message,
     string? Plan,
-    string? ConfirmHint)
+    string? ConfirmHint,
+    IReadOnlyList<string>? Dependents = null)
 {
-    public static MutationResult Applied(string op, string msg) =>
-        new(MutationStatus.Applied, op, msg, null, null);
+    public static MutationResult Applied(string op, string msg, IReadOnlyList<string>? dependents = null) =>
+        new(MutationStatus.Applied, op, msg, null, null, dependents);
 
     public static MutationResult Denied(string op, string msg) =>
         new(MutationStatus.Denied, op, msg, null, null);
 
-    public static MutationResult Awaiting(string op, string plan, string hint) =>
-        new(MutationStatus.AwaitingConfirmation, op, "Confirmation required.", plan, hint);
+    public static MutationResult Awaiting(string op, string plan, string hint, IReadOnlyList<string>? dependents = null) =>
+        new(MutationStatus.AwaitingConfirmation, op, "Confirmation required.", plan, hint, dependents);
 
     public static MutationResult Failed(string op, string msg) =>
         new(MutationStatus.Failed, op, msg, null, null);

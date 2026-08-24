@@ -44,6 +44,16 @@ def main() -> int:
         s = paths(c.call("tia_connect", {"mode": "headless"})["path"])
         blk = s["plc"] + "/block:FB_Test"
         c.call("tia_block_import", {"plcPath": s["plc"], "name": "FB_Test", "source": TEST_BLOCK_SOURCE, "type": "FB"})
+        # delete previews report dependents: seeded FB_Motor is called by FC_Stop, typed by DB_Motor,
+        # declares UDT_MotorParams; the imported FB_Test is a leaf with no dependents.
+        r = c.call("tia_block_delete", {"path": s["plc"] + "/block:FB_Motor"})
+        deps = r.get("dependents") or []
+        print("  FB_Motor dependents:", "; ".join(deps))
+        assert any("FC_Stop" in d and "Call" in d for d in deps), deps
+        assert any("DB_Motor" in d and "InstanceDB" in d for d in deps), deps
+        assert "UDT_MotorParams" in r["plan"], r["plan"]
+        assert c.call("tia_tag_delete", {"path": s["plc"] + "/tagtable:Default/tag:Start"})["dependents"] == [
+            "FB_Motor (SCL-Function block): UsedBy/Read x1"]
         assert c.call("tia_block_delete", {"path": blk})["status"] == "AwaitingConfirmation"
         assert c.call("tia_block_delete", {"path": blk, "confirm": True})["status"] == "Applied"
         items = c.call("tia_device_item_list", {"path": s["device"]})

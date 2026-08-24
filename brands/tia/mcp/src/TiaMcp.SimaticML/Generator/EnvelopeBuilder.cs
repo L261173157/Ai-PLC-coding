@@ -33,6 +33,21 @@ internal static class EnvelopeBuilder
         attributeList.Add(new XElement("ProgrammingLanguage", "LAD"));
 
         var objectList = new XElement("ObjectList");
+        // Block comment first (matches export order); IDs 1000+ keep clear of CompileUnit IDs.
+        // Live-verified 2026-08-23: cultures absent from the project are SILENTLY STRIPPED on
+        // block import (zh-CN vanished on a default en-US project), so comments pin en-US.
+        if (!string.IsNullOrEmpty(spec.Comment))
+        {
+            objectList.Add(new XElement("MultilingualText",
+                new XAttribute("ID", 1000), new XAttribute("CompositionName", "Comment"),
+                new XElement("ObjectList",
+                    new XElement("MultilingualTextItem",
+                        new XAttribute("ID", 1001), new XAttribute("CompositionName", "Items"),
+                        new XElement("AttributeList",
+                            new XElement("Culture", "en-US"),
+                            new XElement("Text", spec.Comment!))))));
+        }
+
         var unitId = 1;
         foreach (var flg in flgNets)
         {
@@ -83,8 +98,10 @@ internal static class EnvelopeBuilder
                     new XAttribute("Name", m.Name ?? ""), new XAttribute("Datatype", m.Datatype ?? ""));
                 if (!string.IsNullOrEmpty(m.Comment))
                 {
+                    // en-US, not zh-CN: cultures missing from the project are silently stripped on
+                    // import (live-verified 2026-08-23) — Chinese text inside en-US survives fine.
                     member.Add(new XElement("Comment",
-                        new XElement("MultiLanguageText", new XAttribute("Lang", "zh-CN"), m.Comment)));
+                        new XElement("MultiLanguageText", new XAttribute("Lang", "en-US"), m.Comment)));
                 }
 
                 if (!string.IsNullOrEmpty(m.StartValue))

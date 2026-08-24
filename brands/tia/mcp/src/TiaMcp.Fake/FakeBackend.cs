@@ -548,7 +548,7 @@ public sealed class FakeBackend : ITiaBackend, ITiaCodeBackend
             {
                 throw new FileNotFoundException("No PLC found at the given path.");
             }
-            var name = ExtractXmlName(sourceXml) ?? "FakeUdt";
+            var name = ExtractXmlName(LoadSourceXml(sourceXml)) ?? "FakeUdt";
             return Task.FromResult(new ImportResult(
                 $"{PlcPath}/type:{name}", new[] { name }, $"Imported UDT '{name}' (fake)."));
         }
@@ -562,7 +562,7 @@ public sealed class FakeBackend : ITiaBackend, ITiaCodeBackend
             {
                 throw new FileNotFoundException("No PLC found at the given path.");
             }
-            var name = ExtractXmlName(sourceXml) ?? "FakeTagTable";
+            var name = ExtractXmlName(LoadSourceXml(sourceXml)) ?? "FakeTagTable";
             return Task.FromResult(new ImportResult(
                 $"{PlcPath}/tagtable:{name}", new[] { name }, $"Imported tag table '{name}' (fake)."));
         }
@@ -674,8 +674,55 @@ public sealed class FakeBackend : ITiaBackend, ITiaCodeBackend
     public Task<InterfaceInfo> ReadInterfaceAsync(string path, CancellationToken ct) =>
         throw new NotSupportedException("Structured interface read needs real TIA (use --backend openness).");
 
-    public Task<CrossRefResult> GetCrossReferencesAsync(string path, CancellationToken ct) =>
-        throw new NotSupportedException("Cross-references need real TIA (use --backend openness).");
+    // --- #4: cross references (synthetic; shaped like the real backend's output) ---
+
+    /// <summary>Deterministic synthetic where-used for the seeded demo world: FB_Motor is called by
+    /// FC_Stop, typed by DB_Motor, and declares UDT_MotorParams; the seeded Start/Stop tags are read
+    /// by FB_Motor and Running is written by it. Carries the reference shapes the delete previews
+    /// filter on (UsedBy/Call, TypeInstance/InstanceDB, Uses/Declaration) so the dependents
+    /// reporting is exercisable offline, without a real Portal.</summary>
+    public Task<CrossRefResult> GetCrossReferencesAsync(string path, CancellationToken ct)
+    {
+        lock (_lock)
+        {
+            var entries = new List<XRefEntry>();
+
+            if (_world.FindTag(path) is { } tag)
+            {
+                var access = tag.Name switch
+                {
+                    "Start" or "Stop" => "Read",
+                    "Running" => "Write",
+                    _ => null,
+                };
+                if (access is not null)
+                {
+                    entries.Add(new XRefEntry(
+                        "FB_Motor", "PLC_1\\Program blocks\\FB_Motor", "SCL-Function block", null,
+                        new[] { new XRefLocation("UsedBy", access, null, null) }));
+                }
+
+                return Task.FromResult(new CrossRefResult(path, entries.Count, entries));
+            }
+
+            var block = _world.FindBlock(path)
+                        ?? throw new FileNotFoundException($"Block or tag not found at '{path}'.");
+            if (block.Name == "FB_Motor")
+            {
+                entries.Add(new XRefEntry(
+                    "FC_Stop", "PLC_1\\Program blocks\\FC_Stop", "SCL-Function", null,
+                    new[] { new XRefLocation("UsedBy", "Call", null, null) }));
+                entries.Add(new XRefEntry(
+                    "DB_Motor", "PLC_1\\Program blocks\\DB_Motor", "Instance DB of FB_Motor [FB1]", "%DB1",
+                    new[] { new XRefLocation("TypeInstance", "InstanceDB", "%DB1", null) }));
+                entries.Add(new XRefEntry(
+                    "UDT_MotorParams", "PLC_1\\PLC data types\\UDT_MotorParams", "PLC data type", null,
+                    new[] { new XRefLocation("Uses", "Declaration", null, null) }));
+            }
+
+            return Task.FromResult(new CrossRefResult(path, entries.Count, entries));
+        }
+    }
 
     public Task<string> DeleteDeviceAsync(string projectPath, string deviceName, CancellationToken ct) =>
         throw new NotSupportedException("Hardware delete needs real TIA (use --backend openness).");
@@ -695,6 +742,18 @@ public sealed class FakeBackend : ITiaBackend, ITiaCodeBackend
         }
         var m = System.Text.RegularExpressions.Regex.Match(xml, "Name\\s*=\\s*\"([^\"]+)\"");
         return m.Success ? m.Groups[1].Value : null;
+    }
+
+    /// <summary>Resolve a source argument that may be inline XML OR a path to an existing .xml
+    /// file on disk (same contract as the Openness worker's imports): a path that exists is read
+    /// to its content, anything else passes through unchanged.</summary>
+    private static string? LoadSourceXml(string? source)
+    {
+        if (string.IsNullOrWhiteSpace(source) || source.TrimStart().StartsWith("<"))
+        {
+            return source;
+        }
+        return File.Exists(source) ? File.ReadAllText(source) : source;
     }
 
     private static string NormalizeGroupKind(string groupKind)

@@ -82,13 +82,14 @@ public sealed class BridgeBackend : ITiaBackend, ITiaCodeBackend, IDisposable
         CallAsync<BlockSource>(RpcOp.ReadBlockSource, new PathArgs(blockPath), ct);
 
     public Task<ExportResult> ExportBlockAsync(string blockPath, ExportFormat format, string? outDir, CancellationToken ct) =>
-        CallAsync<ExportResult>(RpcOp.ExportBlock, new ExportBlockArgs(blockPath, format, outDir), ct);
+        CallAsync<ExportResult>(RpcOp.ExportBlock, new ExportBlockArgs(blockPath, format, NormalizeDirPath(outDir)), ct);
 
     public Task<ListTagsResult> ListTagsAsync(string scopePath, int limit, int offset, CancellationToken ct) =>
         CallAsync<ListTagsResult>(RpcOp.ListTags, new ListTagsArgs(scopePath, limit, offset), ct);
 
     public Task<string> ImportBlockAsync(string plcPath, CreateBlockRequest request, CancellationToken ct) =>
-        CallAsync<string>(RpcOp.ImportBlock, new ImportBlockArgs(plcPath, request), ct);
+        CallAsync<string>(RpcOp.ImportBlock, new ImportBlockArgs(plcPath,
+            request with { Source = NormalizeSourcePath(request.Source) }), ct);
 
     public Task DeleteBlockAsync(string blockPath, CancellationToken ct) =>
         CallVoidAsync(RpcOp.DeleteBlock, new PathArgs(blockPath), ct);
@@ -109,7 +110,7 @@ public sealed class BridgeBackend : ITiaBackend, ITiaCodeBackend, IDisposable
         CallAsync<ListTagTablesResult>(RpcOp.ListTagTables, new PathArgs(scopePath), ct);
 
     public Task<ExportResult> ExportTagTableAsync(string tagTablePath, string? outDir, CancellationToken ct) =>
-        CallAsync<ExportResult>(RpcOp.ExportTagTable, new ExportTagTableArgs(tagTablePath, outDir), ct);
+        CallAsync<ExportResult>(RpcOp.ExportTagTable, new ExportTagTableArgs(tagTablePath, NormalizeDirPath(outDir)), ct);
 
     public Task<InterfaceInfo> ReadInterfaceAsync(string path, CancellationToken ct) =>
         CallAsync<InterfaceInfo>(RpcOp.ReadInterface, new PathArgs(path), ct);
@@ -226,10 +227,10 @@ public sealed class BridgeBackend : ITiaBackend, ITiaCodeBackend, IDisposable
     // ----- P7: data import / source generation / groups / library reuse -----
 
     public Task<ImportResult> ImportUdtAsync(string plcPath, string sourceXml, CancellationToken ct) =>
-        CallAsync<ImportResult>(RpcOp.ImportUdt, new ImportXmlArgs(plcPath, sourceXml), ct);
+        CallAsync<ImportResult>(RpcOp.ImportUdt, new ImportXmlArgs(plcPath, NormalizeSourcePath(sourceXml)), ct);
 
     public Task<ImportResult> ImportTagTableAsync(string plcPath, string sourceXml, CancellationToken ct) =>
-        CallAsync<ImportResult>(RpcOp.ImportTagTable, new ImportXmlArgs(plcPath, sourceXml), ct);
+        CallAsync<ImportResult>(RpcOp.ImportTagTable, new ImportXmlArgs(plcPath, NormalizeSourcePath(sourceXml)), ct);
 
     public Task<ImportResult> GenerateBlocksFromSourceAsync(
         string plcPath, string sourceName, string sourceText, CancellationToken ct) =>
@@ -306,13 +307,31 @@ public sealed class BridgeBackend : ITiaBackend, ITiaCodeBackend, IDisposable
     private static string NewId() => Interlocked.Increment(ref _idCounter).ToString(System.Globalization.CultureInfo.InvariantCulture);
 
     /// <summary>Find the worker exe: explicit path first, else a dev-layout default near the server.</summary>
+    /// <summary>Inline XML passes through; a (relative or absolute) file path is resolved against
+    /// THIS server process's CWD before crossing to the worker — the worker's CWD is its own bin
+    /// folder, so a relative path would silently miss there and get written to disk AS xml text
+    /// (live-verified failure mode 2026-08-23: "Data at the root level is invalid. Line 1").</summary>
+    private static string NormalizeSourcePath(string? source)
+    {
+        if (string.IsNullOrWhiteSpace(source) || source.TrimStart().StartsWith("<"))
+        {
+            return source ?? string.Empty;
+        }
+        return Path.GetFullPath(source);
+    }
+
+    /// <summary>Same CWD rule for export outDir: resolve against the server's CWD here, because a
+    /// relative dir in the worker lands in the worker's bin folder / is rejected by TIA Export
+    /// ("The argument 'path' cannot be a relative path", live-verified 2026-08-23).</summary>
+    private static string? NormalizeDirPath(string? dir) =>
+        string.IsNullOrWhiteSpace(dir) ? dir : Path.GetFullPath(dir);
+
     private static string ResolveWorkerPath(string? configured)
     {
         if (!string.IsNullOrWhiteSpace(configured))
         {
             return Path.GetFullPath(configured);
         }
-
         // 1. Published/bundled layout: the worker ships next to this server exe in openness-worker/
         //    (the BundleOpennessWorker MSBuild target drops it there on publish). AppContext.BaseDirectory
         //    is the exe folder for a published app.

@@ -65,6 +65,17 @@ SCL 代码不是纯文本,放在:
 - **可往返**:`tia_block_export` 一个 GRAPH FB → 改 `<Name>`/`<Number>` → `tia_block_import` → 编译 0 错误。
 - GRAPH SimaticML 是最大最复杂的 schema(TIA 导入时自动补全约 2000 行运行时接口:RT_DATA/步标志/偏移量…,手写最小版不用管);**复杂拓扑不要从零手敲**,用**模板法**(导出相似 GRAPH 块,改步/转换/动作,重导入)。
 - 2026-08 真机(V21/S7-1511)实测的从零最小形态要点(全部写进 `GraphSpecGenerator`):`<MemoryLayout ReadOnly="true">Standard</MemoryLayout>`;体在 `NetworkSource` 下 `Graph xmlns="…/NetworkSource/Graph/v6"`(其内 FlgNet 也归 Graph 命名空间,别用 FlgNet/v5);步-转移**成对编号**(1,21,32,43…=11i+10);每步必备 `Supervisions`(条件→`SvCoil`)与 `Interlocks`(→`IlCoil`);转移条件→`TrCoil`;序列以 `Transition→EndConnection` 终结;动作操作数是 `<Token Text="#局部名"/>`(带 #);步/转移名必须唯一;接口需 `OFF_SQ/INIT_SQ/ACK_EF` 输入。参考样板:`tests/fixtures/FB_GraphDemo.xml`(真机导出)。
+- **循环顺控**(2026-08-23 真机验证):write_code spec 加 `"loop": true`(读回对称:`tia_block_read_code` 的 graph 视图对闭环顺控报 `loop: true`);手写 XML 时把尾连接的 `EndConnection` 换成回连首步的 **Jump 连接**:
+  ```xml
+  <Connection>
+    <NodeFrom><TransitionRef Number="54" /></NodeFrom>  <!-- 尾转移号 -->
+    <NodeTo><StepRef Number="1" /></NodeTo>              <!-- 初始步号 -->
+    <LinkType>Jump</LinkType>
+  </Connection>
+  ```
+  (`LinkType` 只有 `Direct`/`Jump` 两值;Direct 回连会报 "The sequencer does not start with a step"。)
+- **每步至多 1 个动作**(2026-08-23 实测 TIA V21 XML 导入上限):多 `<Action>` 并列报 "action table … line break";`<NewLine/>` 行分隔报 "not supported"(xsd 允许但 Import 拒);单 Action 多 Token 导入能过但编译报 action 语法错。多驱动的操作数放调用 OB 合并,或拆成独立步。
+- **运行时状态位**:GRAPH 接口**没有** `EN_SQ`(编译报 not defined);步激活标志在 TIA 自动追加的步实例(`G7_StepPlus_V6`)上,如背景 DB 的 `StpA.X`(全 0=序列到 End)。`INIT_SQ` 置位可重启回初始步。
 - 全新顺序逻辑,有时用 SCL 状态机(`CASE step OF`)更快;GRAPH-native 适合克隆/改造现有 GRAPH。
 
 ## UDT(SW.Types.PlcStruct)
@@ -107,7 +118,7 @@ SCL 代码不是纯文本,放在:
 
 ### ⚠️ 手敲必踩的坑(每条都实测报错过)
 
-1. **成员注释是元素文本,不是 `Text=` 属性**:正确 `<MultiLanguageText Lang="zh-CN">文本</MultiLanguageText>`;写成 `<MultiLanguageText Lang="zh-CN" Text=".." />` 报 `'Text' attribute is not declared`。
+1. **成员注释是元素文本,不是 `Text=` 属性**:正确 `<MultiLanguageText Lang="zh-CN">文本</MultiLanguageText>`;写成 `<MultiLanguageText Lang="zh-CN" Text=".." />` 报 `'Text' attribute is not declared`。**注释 culture 用项目里已有的**(默认新项目仅 en-US):zh-CN 注释在无 zh-CN 的项目里,tag 表 import 显式报错、块 import **静默剥离**;en-US culture 装中文文本显示正常(2026-08-23 真机实测)。
 2. **`<StartValue>` 不带 `SystemString`**:正确 `<StartValue>0</StartValue>`;写 `<StartValue SystemString="false">0</StartValue>` 报 `'SystemString' attribute is not declared`。可整段省略(用类型默认值)。
 3. **`<Sections>` 必须在 `<Interface>` 内**(`<Interface>` 在 `<AttributeList>` 内);PlcStruct 的 `<AttributeList>` 必须有 `<Namespace />`——否则 `tia_udt_import` 抛 EngineeringTargetInvocationException。
 4. **类型注释(ObjectList)用 `MultilingualTextItem`,不是 `MultiLanguageText`**:ObjectList 注释是 `<MultilingualText CompositionName="Comment"><ObjectList><MultilingualTextItem ID=".." CompositionName="Items"><AttributeList><Culture>zh-CN</Culture><Text>..</Text></AttributeList></MultilingualTextItem></ObjectList></MultilingualText>`;写成裸 `<MultiLanguageText>` 报 `class ... not supported`。**最省事:整个 ObjectList 省掉**(类型注释可选)。

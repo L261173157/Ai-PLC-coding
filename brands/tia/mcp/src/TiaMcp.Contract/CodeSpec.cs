@@ -8,7 +8,9 @@ namespace TiaMcp.Contract;
 /// contacts (NO / NC — edge contacts are not yet supported for writing), nested and/or trees,
 /// coil / set / reset outputs, IEC timers (ton/tof/tp with multi-instance + PT), MOVE, and inline
 /// compares (eq/ne/ge/gt/le/lt). GRAPH writes a linear sequence (machine-verified from-scratch
-/// shape; TIA auto-appends the GRAPH runtime interface on import).
+/// shape; TIA auto-appends the GRAPH runtime interface on import); <c>Loop</c> closes the sequence
+/// with a Jump connection from the last transition back to the initial step (machine-verified
+/// 2026-08-23: tail TransitionRef → StepRef 1 + LinkType Jump imports and compiles 0 errors).
 /// </summary>
 public sealed record CodeBlockSpec(
     string Name,
@@ -17,7 +19,8 @@ public sealed record CodeBlockSpec(
     string? Comment,
     IReadOnlyList<SpecSection>? Interface,
     IReadOnlyList<SpecNetwork>? Networks,
-    IReadOnlyList<GraphStepSpec>? Sequence);
+    IReadOnlyList<GraphStepSpec>? Sequence,
+    bool? Loop = null);
 
 /// <summary>
 /// One GRAPH step for the write spec: a name, actions (qualifier N/R/S/D/L/… + operand, by default

@@ -32,6 +32,10 @@ description: "做任何 TIA 操作之前的第一步——连接 TIA Portal、�
 | `interactive` | 新开一个带界面的 Portal | 需要人看着 GUI 时 |
 | `headless` | 新开一个无界面 Portal | 全自动批处理 |
 
+**⚠️ attach 会弹 Openness 授权对话框**:挂接时 Portal GUI 会弹出是否允许 Openness 客户端的询问框,**必须点"允许/是"**。误点"否"后 Portal 会把**之后所有** Openness 调用(包括已连接会话的 save、新的 attach)全部吊死——症状是调用挂起不返回。恢复:关掉该 Portal 窗口重开。**无人值守/自动化场景直接用 headless,它不弹此框**。RPC 层有超时兜底(默认 2 分钟,慢操作 5–15 分钟),超时会杀掉卡死的 worker 并在错误信息里指路。
+
+**⚠️ Openness 授权是"按构建指纹"的(重编 worker = 要重新授权)**:TIA 把已批准应用记在 `HKLM\SOFTWARE\Siemens\Automation\Openness\AllowList\<exe名>\Entry (N)`(SHA256 指纹 + 路径)。**每次重编并部署 worker,指纹变化 → 再次弹授权框**;attach 场景框可见(点一次允许即可),**headless 场景框不可见 → connect 挂死到看门狗超时**。重编 worker 后第一次连接挂死/超时,先想这个。修法:跑 `python brands/tia/mcp/tests/approve_worker.py`——它起一个 interactive Portal,在弹出的框里点一次"允许",该构建即入 AllowList,headless 随即可用。
+
 **⚠️ attach 直接操作用户实时 GUI 项目**:写操作(建块、实例化、组态)会**真的改**那个项目,且**不会自动保存**。用 attach 做实验后,要么别保存、要么手动撤销/删除所建对象,以免污染用户工程。
 
 **⚠️ headless 反复强杀会卡死**:多次强杀 Portal/worker 会残留 `Siemens.Automation.ObjectFrame.FileStorage.Server`,把 Siemens 的 IPC/许可栈搞坏,之后新 headless `Connect` 会卡住不返回(几分钟无响应)。遇到就改走 **attach**(让用户在 GUI 里开好项目),或重启机器清状态。
@@ -40,7 +44,7 @@ description: "做任何 TIA 操作之前的第一步——连接 TIA Portal、�
 
 | 工具 | 作用 |
 |------|------|
-| `tia_project_open` | 打开项目(`.ap21`;旧 `.ap18/.ap19` 会被 TIA 升级重组后另存为 `.ap21`)。`visible=false` 走无界面打开,适合批处理;路径在 server 层归一化为绝对路径 |
+| `tia_project_open` | 打开项目:`.ap21` 全路径(旧 `.ap18/.ap19` 会被 TIA 升级重组后另存为 `.ap21`),或**裸项目名**(attach 场景下解析该 Portal 里已开的项目)。`visible=false` 走无界面打开,适合批处理;路径在 server 层归一化为绝对路径 |
 | `tia_project_status` | 读项目元信息(名/路径/版本/作者/是否改动/大小) |
 | `tia_project_save` | 保存 |
 | `tia_project_save_as` | 另存(V21 会把当前项目重绑到副本) |
@@ -69,6 +73,9 @@ description: "做任何 TIA 操作之前的第一步——连接 TIA Portal、�
 | 报错 | 原因 / 修法 |
 |------|-------------|
 | COMException(connect 时) | 用户没进 `Siemens TIA Openness` 组,或没注销重登 |
+| "Openness worker did not respond to '…' within …s" | Portal 被挡:多半是 **Openness 授权弹窗在等人点**(去 GUI 点"允许/是"),或模态框/项目锁。卡死 worker 已被自动杀掉,下次调用自动重拉 worker;无人值守改 headless |
+| **重编/部署 worker 后** headless connect 300s 超时(看门狗击杀) | 新构建指纹未入 AllowList,headless 的授权框不可见 → 挂死。跑 `tests/approve_worker.py` 点一次"允许"即根治 |
+| attach 后所有调用挂死不返回(也不报错) | 授权框被点了"否"或一直没点;关 Portal 重开,attach 时点"允许" |
 | "Another project is already open" | 先 `tia_project_close` |
 | "已被用户 &lt;用户名&gt; 打开…2 分钟" | 杀掉上个会话残留的 worker 进程 |
 | headless connect 卡死不返回 | 残留 Siemens 进程污染;清进程或重启,改用 attach |

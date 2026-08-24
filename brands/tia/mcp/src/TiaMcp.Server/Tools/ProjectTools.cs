@@ -23,12 +23,13 @@ public sealed class ProjectTools
 
     [McpServerTool(Name = "tia_project_open")]
     [Description(
-        "Open a TIA project (.ap19/.ap21). Returns project info including its path for further calls. " +
-        "The Fake backend always exposes the single 'Demo' project regardless of the path given.")]
+        "Open a TIA project: pass the .ap19/.ap21 file path, or a bare project NAME to resolve a " +
+        "project already open in this Portal (attach). Returns project info including its path for " +
+        "further calls. The Fake backend always exposes the single 'Demo' project regardless of the path given.")]
     public Task<object> TiaProjectOpenAsync(
         [Description("Session path returned by tia_connect, e.g. session:s-fake.")]
         string sessionPath,
-        [Description("Path to the .ap19/.ap21 project file (Openness) or 'Demo' (Fake). May be relative to the workspace.")]
+        [Description("Path to the .ap19/.ap21 project file (may be relative to the workspace), or a bare project name of one already open in the Portal.")]
         string path,
         [Description("Open visibly in the TIA UI (default true).")]
         bool visible = true,
@@ -36,8 +37,12 @@ public sealed class ProjectTools
     {
         // Openness rejects relative paths, and the net48 worker is a separate process whose CWD
         // differs from the agent's. Resolve against the server's CWD (= the agent's workspace) here
-        // so the worker always receives an absolute path.
-        var absPath = Path.GetFullPath(path);
+        // so the worker always receives an absolute path. ONLY for real .ap1x file paths though —
+        // a bare project NAME (attach case: resolve a project already open in the Portal) must pass
+        // through untouched, or GetFullPath would weld it to the CWD and the name could never match.
+        var absPath = Path.GetExtension(path).StartsWith(".ap", StringComparison.OrdinalIgnoreCase)
+            ? Path.GetFullPath(path)
+            : path;
         return ToolErrors.InvokeAsync(() => _backend.OpenProjectAsync(sessionPath, new OpenProjectRequest(absPath, visible), ct));
     }
 

@@ -241,6 +241,71 @@ def main() -> int:
         gsteps = ((gb.get("graph") or {}).get("steps") or []) if isinstance(gb, dict) else []
         check("GRAPH round-trip", len(gsteps) == 2 and gsteps[1].get("actions") == [{"qualifier": "S", "operand": "Lamp2"}],
               repr([(s.get("name"), s.get("actions")) for s in gsteps]))
+
+        # ---- 6. GRAPH loop: last transition jumps back to the initial step (machine-verified
+        # 2026-08-23: TransitionRef -> StepRef 1 + LinkType Jump imports and compiles clean) ----
+        lspec = json.dumps({
+            "name": "FB_GraphLoop", "blockType": "FB", "language": "GRAPH", "loop": True,
+            "comment": "verify_lad_graph: closed-loop GRAPH sequencer",
+            "interface": [
+                {"section": "Input", "members": [
+                    {"name": "Go", "datatype": "Bool"},
+                    {"name": "Done", "datatype": "Bool"},
+                ]},
+                {"section": "Output", "members": [
+                    {"name": "Lamp1", "datatype": "Bool"},
+                    {"name": "Lamp2", "datatype": "Bool"},
+                ]},
+            ],
+            "sequence": [
+                {"name": "Init", "actions": [{"qualifier": "N", "operand": "Lamp1"}], "transitionOperand": "Go"},
+                {"name": "Work", "actions": [{"qualifier": "S", "operand": "Lamp2"}], "transitionOperand": "Done"},
+            ],
+        })
+        lw = c.call("tia_block_write_code", {"plcPath": plc, "specJson": lspec}, timeout=300)
+        check("GRAPH loop write", lw.get("status") == "Applied", str(lw)[:160])
+        lc = c.call("tia_project_compile", {"scopePath": dev, "mode": "Software"}, timeout=600)
+        check("GRAPH loop compile 0 errors", lc.get("success") is True and lc.get("errors") == 0,
+              f"success={lc.get('success')} errors={lc.get('errors')}")
+        # Read/write symmetry: read_code must surface loop=true on the closed sequencer.
+        lrc = c.call("tia_block_read_code", {"path": plc + "/block:FB_GraphLoop", "includeInterface": False}, timeout=300)
+        lgraph = (lrc.get("graph") or {}) if isinstance(lrc, dict) else {}
+        check("GRAPH loop read-back", lgraph.get("loop") is True, f"loop={lgraph.get('loop')}")
+        grc = c.call("tia_block_read_code", {"path": plc + "/block:FB_GraphWrite", "includeInterface": False}, timeout=300)
+        ggraph = (grc.get("graph") or {}) if isinstance(grc, dict) else {}
+        check("GRAPH linear read-back loop=false", ggraph.get("loop") is False, f"loop={ggraph.get('loop')}")
+        # Exported XML must carry the Jump connection back to step 1.
+        lex = c.call("tia_block_export", {"path": plc + "/block:FB_GraphLoop", "format": "Xml"}, timeout=300)
+        lxml_ = open(lex["filePath"], encoding="utf-8").read() if lex.get("filePath") else ""
+        import re as _re
+        check("GRAPH loop Jump in export",
+              '<LinkType>Jump</LinkType>' in lxml_ and '<StepRef Number="1" />' in lxml_,
+              f"jump={'Jump' in lxml_}, stepref1={'StepRef Number=\"1\"' in lxml_}")
+
+        # ---- 7. Multi-action step must fail fast with the workaround message (TIA V21 XML
+        # import ceiling, live-verified 2026-08-23) ----
+        mspec = json.dumps({
+            "name": "FB_TwoAct", "blockType": "FB", "language": "GRAPH",
+            "interface": [
+                {"section": "Input", "members": [{"name": "Go", "datatype": "Bool"}, {"name": "Done", "datatype": "Bool"}]},
+                {"section": "Output", "members": [{"name": "Out1", "datatype": "Bool"}, {"name": "Out2", "datatype": "Bool"}]},
+            ],
+            "sequence": [
+                {"name": "S1", "actions": [{"qualifier": "N", "operand": "Out1"}, {"qualifier": "S", "operand": "Out2"}],
+                 "transitionOperand": "Go"},
+            ],
+        })
+        mw = c.call("tia_block_write_code", {"plcPath": plc, "specJson": mspec}, timeout=120)
+        mmsg = str(mw.get("_error") or mw.get("message") or mw)
+        check("multi-action rejected with hint", "at most ONE action" in mmsg, mmsg[:140])
+
+        # ---- 8. xref aggregate / limit (live form: counts per referenceType/access, clipped entries) ----
+        xr = c.call("tia_cross_reference", {"path": plc + "/block:FB_LadKitchenSink", "aggregate": True, "limit": 3}, timeout=120)
+        refs = xr.get("references") if isinstance(xr, dict) else None
+        check("xref aggregate+limit",
+              isinstance(refs, list) and len(refs) <= 3 and xr.get("truncated") in (True, False)
+              and (not refs or isinstance(refs[0].get("counts"), dict)),
+              str(xr)[:140])
     finally:
         c.close()
 
