@@ -111,7 +111,16 @@ public sealed class TagTools
                 return MutationResult.Denied(op, decision.DenyReason!);
             }
 
-            var deps = await XrefImpact.DependentsOfAsync(_backend, path, ct).ConfigureAwait(false);
+            List<string> deps;
+            try
+            {
+                deps = await XrefImpact.DependentsOfAsync(_backend, path, ct).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                // A nonexistent tag (or PLC) must preview as Failed, never as "safe to delete".
+                return MutationResult.Failed(op, ex.Message);
+            }
             return MutationResult.Awaiting(op,
                 $"Delete tag at '{path}'." + XrefImpact.DependentsSuffix(deps, null, orphansNow: false),
                 "Re-call tia_tag_delete with confirm=true to proceed.", deps);

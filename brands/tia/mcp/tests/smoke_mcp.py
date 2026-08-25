@@ -56,6 +56,11 @@ def main() -> int:
             "FB_Motor (SCL-Function block): UsedBy/Read x1"]
         assert c.call("tia_block_delete", {"path": blk})["status"] == "AwaitingConfirmation"
         assert c.call("tia_block_delete", {"path": blk, "confirm": True})["status"] == "Applied"
+        # 2026-08-25 guard: a nonexistent block previews as Failed, never "safe to delete".
+        nf = c.call("tia_block_delete", {"path": s["plc"] + "/block:NoSuchBlock"})
+        assert nf["status"] == "Failed" and "not found" in nf["message"].lower(), nf
+        nft = c.call("tia_tag_delete", {"path": s["plc"] + "/tagtable:Default/tag:NoSuchTag"})
+        assert nft["status"] == "Failed" and "not found" in nft["message"].lower(), nft
         items = c.call("tia_device_item_list", {"path": s["device"]})
         print(f"  device items: {len(items)} ({', '.join(i['name'] for i in items)})")
         assert len(items) == 4

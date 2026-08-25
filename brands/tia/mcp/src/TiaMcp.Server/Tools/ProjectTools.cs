@@ -107,7 +107,9 @@ public sealed class ProjectTools
     [McpServerTool(Name = "tia_project_save_as")]
     [Description(
         "Save a copy of the project under a new directory/name (write; needs --mode ReadWrite). " +
-        "Set rebind=true to close the original and reopen the copy in this session.")]
+        "TIA's SaveAs MOVES the project handle to the copy, so afterwards the source is closed in " +
+        "this session either way: rebind=false leaves nothing open (open source or copy explicitly " +
+        "to continue), rebind=true reopens the copy in its place.")]
     public Task<MutationResult> TiaProjectSaveAsAsync(
         [Description("Source project path.")] string projectPath,
         [Description("Absolute target directory (must exist).")] string targetDirectory,
@@ -123,7 +125,8 @@ public sealed class ProjectTools
     [McpServerTool(Name = "tia_project_create")]
     [Description(
         "Create a brand-new empty project in a directory (write; needs --mode ReadWrite). " +
-        "Returns the new project path.")]
+        "The new project is open in the session afterwards at <sessionPath>/project:<projectName> " +
+        "(the .ap1x file lands in <projectDirectory>\\<projectName>\\).")]
     public Task<MutationResult> TiaProjectCreateAsync(
         [Description("Session path returned by tia_connect.")] string sessionPath,
         [Description("Absolute directory to create the project in (must exist).")] string projectDirectory,

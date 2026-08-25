@@ -38,7 +38,11 @@ def post(obj, session_id=None, timeout=150.0):
     if session_id:
         headers["Mcp-Session-Id"] = session_id
     req = urllib.request.Request(URL, data=data, headers=headers, method="POST")
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    # Bypass any system proxy (HTTP_PROXY=127.0.0.1:7890 etc.): the loopback MCP endpoint must
+    # not be routed through it — a local proxy answers loopback POSTs with 502 Bad Gateway
+    # (live-verified 2026-08-25).
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with opener.open(req, timeout=timeout) as resp:
         return resp.headers.get("Mcp-Session-Id"), resp.headers.get("Content-Type", ""), resp.read().decode()
 
 

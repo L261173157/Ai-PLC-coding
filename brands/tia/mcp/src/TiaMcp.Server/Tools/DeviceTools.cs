@@ -54,7 +54,8 @@ public sealed class DeviceTools
     [McpServerTool(Name = "tia_device_add")]
     [Description(
         "Create a device from a catalog typeIdentifier (write; needs --mode ReadWrite). " +
-        "Use tia_catalog_search first to obtain the exact typeIdentifier.")]
+        "Use tia_catalog_search first to obtain the exact typeIdentifier. The station is named " +
+        "deviceName; the root item keeps TIA's own naming (V21's CreateWithItem swaps the two).")]
     public async Task<MutationResult> TiaDeviceAddAsync(
         [Description("Project path.")] string projectPath,
         [Description("Catalog typeIdentifier, e.g. 'OrderNumber:6ES7 510-1DJ01-0AB0/V2.0'.")] string typeIdentifier,
@@ -76,7 +77,8 @@ public sealed class DeviceTools
             _audit.Append(op, projectPath, success: true);
             var w = r.Warnings.Count > 0 ? " warnings: " + string.Join("; ", r.Warnings) : string.Empty;
             return MutationResult.Applied(op,
-                $"Created device '{r.DeviceName}' ({r.TypeIdentifier}), root='{r.RootItemName}'.{w}");
+                $"Created device '{r.DeviceName}' ({r.TypeIdentifier}), root='{r.RootItemName}'.{w} " +
+                $"Address it as {projectPath}/device:{r.DeviceName} (confirm via tia_project_list).");
         }
         catch (Exception ex)
         {

@@ -21,19 +21,30 @@ internal static class XrefImpact
             .Select(t => $"{t.Entry.Name} ({t.Entry.TypeName ?? "block"}): {string.Join(", ", t.Kinds)}")
             .ToList();
 
-    /// <summary>Fetch a path's dependents, degrading to empty on any error — a cross-reference
-    /// failure must never block or crash the delete itself.</summary>
+    /// <summary>Fetch a path's dependents, degrading to empty on a flaky cross-reference service —
+    /// but NOT on a missing target: a nonexistent block/tag must never preview as "safe to delete"
+    /// (live-verified 2026-08-25: deleting a nonexistent FB previewed as AwaitingConfirmation with
+    /// "No dependents found"). Not-found errors propagate to the caller.</summary>
     public static async Task<List<string>> DependentsOfAsync(ITiaBackend backend, string path, CancellationToken ct)
     {
         try
         {
             return ExtractDependents(await backend.GetCrossReferencesAsync(path, ct).ConfigureAwait(false));
         }
-        catch
+        catch (Exception ex) when (!IsNotFound(ex))
         {
             return new List<string>();
         }
     }
+
+    /// <summary>True when the exception means the target (or its PLC/project) does not exist. Worker
+    /// errors arrive with the type embedded in the message ("Openness worker error
+    /// (System.IO.FileNotFoundException): block not found at ..."), the Fake throws
+    /// FileNotFoundException directly — match both shapes.</summary>
+    internal static bool IsNotFound(Exception ex) =>
+        ex is FileNotFoundException
+        || (ex.Message ?? string.Empty).Contains("FileNotFoundException", StringComparison.Ordinal)
+        || (ex.Message ?? string.Empty).Contains("not found", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>One-line impact summary appended to a preview plan / applied message; the structured
     /// detail rides in <see cref="MutationResult.Dependents"/>. <paramref name="usedTypes"/> (block

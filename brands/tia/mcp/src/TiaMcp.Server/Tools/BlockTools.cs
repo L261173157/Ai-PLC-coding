@@ -199,10 +199,19 @@ public sealed class BlockTools
                 return MutationResult.Denied(op, decision.DenyReason!);
             }
 
-            var (dependents, usedTypes) = await DescribeDeleteImpactAsync(path, ct).ConfigureAwait(false);
+            (List<string> Dependents, List<string> UsedTypes) impact;
+            try
+            {
+                impact = await DescribeDeleteImpactAsync(path, ct).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                // A nonexistent block (or PLC) must preview as Failed, never as "safe to delete".
+                return MutationResult.Failed(op, ex.Message);
+            }
             return MutationResult.Awaiting(op,
-                $"Delete block at '{path}'." + XrefImpact.DependentsSuffix(dependents, usedTypes, orphansNow: false),
-                "Re-call tia_block_delete with confirm=true to proceed.", dependents);
+                $"Delete block at '{path}'." + XrefImpact.DependentsSuffix(impact.Dependents, impact.UsedTypes, orphansNow: false),
+                "Re-call tia_block_delete with confirm=true to proceed.", impact.Dependents);
         }
 
         try
@@ -240,8 +249,10 @@ public sealed class BlockTools
                 .ToList();
             return (XrefImpact.ExtractDependents(xref), usedTypes);
         }
-        catch
+        catch (Exception ex) when (!XrefImpact.IsNotFound(ex))
         {
+            // Degrade on a flaky cross-reference service; a missing target must propagate so the
+            // delete preview reports Failed instead of "No dependents found — safe to delete".
             return (new List<string>(), new List<string>());
         }
     }

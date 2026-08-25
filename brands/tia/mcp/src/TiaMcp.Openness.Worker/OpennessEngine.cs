@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Text.RegularExpressions;
 using System.Text;
 using Microsoft.Win32;
 using System.Threading;
@@ -627,7 +628,7 @@ public sealed class OpennessEngine : ITiaBackend, IDisposable
         // tables filed in subgroups are not silently skipped (parity with ListTagTablesAsync).
         var tableName = PathSegment(scopePath, "tagtable");
         IEnumerable<PlcTagTable> tables = !string.IsNullOrEmpty(tableName)
-            ? new[] { FindTagTable(software.TagTableGroup, tableName!) ?? throw NotFound("tag table", scopePath) }
+            ? new[] { ResolveTagTable(software, tableName) ?? throw NotFound("tag table", scopePath) }
             : EnumerateTagTables(software.TagTableGroup);
 
         var tags = new List<TagInfo>();
@@ -658,14 +659,8 @@ public sealed class OpennessEngine : ITiaBackend, IDisposable
         PlcTagTable table;
         if (!string.IsNullOrEmpty(tableName))
         {
-            // Live-verified 2026-08-23: real projects name the default table "Default tag table"
-            // (the Fake backend's is just "Default"), so accept the short alias for the default
-            // table instead of forcing callers to spell the display name in the path segment.
-            table = FindTagTable(software.TagTableGroup, tableName!)
-                    ?? (tableName!.Equals("Default", StringComparison.OrdinalIgnoreCase)
-                        ? FindTagTable(software.TagTableGroup, "Default tag table")
-                        : null)
-                    ?? throw NotFound("tag table", tagTablePath);
+            // "Default" aliases the real projects' "Default tag table" (see ResolveTagTable).
+            table = ResolveTagTable(software, tableName) ?? throw NotFound("tag table", tagTablePath);
         }
         else
         {
@@ -695,7 +690,7 @@ public sealed class OpennessEngine : ITiaBackend, IDisposable
             throw NotFound("tag", tagPath);
         }
 
-        var table = software.TagTableGroup.TagTables.Find(tableName) ?? throw NotFound("tag table", tagPath);
+        var table = ResolveTagTable(software, tableName) ?? throw NotFound("tag table", tagPath);
         var tag = table.Tags.Find(tagName) ?? throw NotFound("tag", tagPath);
         tag.Delete();
         return Task.CompletedTask;
@@ -783,6 +778,25 @@ public sealed class OpennessEngine : ITiaBackend, IDisposable
         {
             return Task.FromResult(new AddDeviceResult(
                 deviceName, deviceItemName, typeIdentifier, warnings));
+        }
+
+        // V21 quirk (live-verified 2026-08-25): Devices.CreateWithItem(typeId, name, deviceItemName)
+        // names the STATION with the 3rd arg and the root CPU item with the 2nd — the reverse of the
+        // plain reading of our tool params. Every later call addresses the station as
+        // <project>/device:<deviceName>, and the historically verified calls (P3 notes) always
+        // passed identical names, hiding the swap. Force the station name to match deviceName;
+        // if TIA refuses the rename, the warning says so and the result still reports the real name.
+        try
+        {
+            if (!string.Equals(SafeStr(() => device.Name), deviceName, StringComparison.OrdinalIgnoreCase))
+            {
+                device.Name = deviceName;
+            }
+        }
+        catch (EngineeringException ex)
+        {
+            warnings.Add("TIA named the station '" + SafeStr(() => device.Name) +
+                         "' (rename to '" + deviceName + "' refused): " + ex.Message);
         }
 
         var name = SafeStr(() => device.Name, deviceName);
@@ -1157,9 +1171,7 @@ public sealed class OpennessEngine : ITiaBackend, IDisposable
         {
             var software = ResolvePlcSoftware(path) ?? throw NotFound("PLC", path);
             var tableName = PathSegment(path, "tagtable");
-            var table = string.IsNullOrEmpty(tableName)
-                ? null
-                : software.TagTableGroup.TagTables.Find(tableName);
+            var table = ResolveTagTable(software, tableName);
             var tag = table?.Tags.Find(PathSegment(path, "tag")) ?? throw NotFound("tag", path);
             var tagSvc = tag.GetService<CrossReferenceService>()
                          ?? throw new NotSupportedException("Cross-reference service unavailable for this tag.");
@@ -1378,7 +1390,7 @@ public sealed class OpennessEngine : ITiaBackend, IDisposable
         // program-wide unique, so a recursive find-by-name is unambiguous.
         var software = ResolvePlcSoftware(tagTablePath) ?? throw NotFound("PLC", tagTablePath);
         var name = PathSegment(tagTablePath, "tagtable");
-        var table = string.IsNullOrEmpty(name) ? null : FindTagTable(software.TagTableGroup, name!);
+        var table = ResolveTagTable(software, name);
         if (table is null) throw NotFound("tag table", tagTablePath);
 
         var dir = string.IsNullOrWhiteSpace(outDir)
@@ -1393,6 +1405,18 @@ public sealed class OpennessEngine : ITiaBackend, IDisposable
         var bytes = (int)new FileInfo(file).Length;
         return Task.FromResult(new ExportResult(tagTablePath, ExportFormat.Xml, file, bytes));
     }
+
+    /// <summary>Resolve a tag table from a path segment: recursive find by name, with the "Default"
+    /// short alias for real projects' "Default tag table" (live-verified 2026-08-23/25). Every
+    /// by-name tag-table lookup must go through this — creation used to accept the alias while
+    /// list/delete/export/cross-ref didn't, splitting the create→read round-trip.</summary>
+    private static PlcTagTable? ResolveTagTable(PlcSoftware software, string? name)
+        => string.IsNullOrEmpty(name)
+            ? null
+            : FindTagTable(software.TagTableGroup, name!)
+              ?? (name!.Equals("Default", StringComparison.OrdinalIgnoreCase)
+                  ? FindTagTable(software.TagTableGroup, "Default tag table")
+                  : null);
 
     /// <summary>Depth-first find of a tag table by name across the tag-table group and all nested user
     /// groups (tables can live in subgroups, not just the root). Case-insensitive.</summary>
@@ -1473,10 +1497,42 @@ public sealed class OpennessEngine : ITiaBackend, IDisposable
         var before = SnapshotBlockNames(software);
         // GenerateBlocksFromSource parses the source and creates/updates the blocks it declares.
         external.GenerateBlocksFromSource();
-        var created = DiffNames(before, SnapshotBlockNames(software));
+        var after = SnapshotBlockNames(software);
+        var created = DiffNames(before, after);
+        // TIA SILENTLY SKIPS declarations whose block already exists (e.g. the project's default OB
+        // "Main") — a before/after diff cannot see that. Live-verified 2026-08-25: an OB "Main" + DB
+        // source reported "Generated 1 block(s)" with no word about the untouched OB. Parse the
+        // declared names so an Applied result never hides a dropped declaration.
+        var declared = new List<string>();
+        foreach (Match m in Regex.Matches(
+                     sourceText ?? string.Empty,
+                     "(?:FUNCTION_BLOCK|FUNCTION|ORGANIZATION_BLOCK|DATA_BLOCK|TYPE)\\s+\"([^\"]+)\"",
+                     RegexOptions.IgnoreCase))
+        {
+            var n = m.Groups[1].Value;
+            if (!created.Contains(n) && !declared.Contains(n, StringComparer.OrdinalIgnoreCase))
+            {
+                declared.Add(n);
+            }
+        }
+        var note = string.Empty;
+        if (declared.Count > 0)
+        {
+            var untouched = declared.Where(n => before.Contains(n)).ToList();
+            var missing = declared.Where(n => !before.Contains(n)).ToList();
+            if (untouched.Count > 0)
+            {
+                note += " TIA left existing block(s) untouched: " + string.Join(", ", untouched) + ".";
+            }
+            if (missing.Count > 0)
+            {
+                note += " Declared but not generated (check syntax): " + string.Join(", ", missing) + ".";
+            }
+        }
         var plc = PlcPathFor(plcPath);
         return Task.FromResult(new ImportResult(
-            plc, created, "Generated " + created.Count + " block(s) from source '" + sourceName + "'" + NameList(created) + "."));
+            plc, created, "Generated " + created.Count + " block(s) from source '" + sourceName + "'"
+            + NameList(created) + "." + note));
     }
 
     public Task<string> CreateGroupAsync(string plcPath, string groupKind, string groupName, CancellationToken ct)

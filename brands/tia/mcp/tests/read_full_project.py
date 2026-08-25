@@ -219,6 +219,7 @@ def main() -> int:
     c = Client(dll)
     d = Dumper(out_root, c)
     plc_summaries = []
+    project_path = None
     t0 = time.time()
     try:
         d.save("initialize.json", c.initialize())
@@ -254,6 +255,15 @@ def main() -> int:
             "failed_calls": len(d.errors)})
     finally:
         d.save("errors.json", d.errors)
+        # Close the project BEFORE killing the server: a Portal that dies holding a project leaves
+        # TIA's "not correctly closed" lock, and the next script opening the same .ap21 fails for
+        # ~2 minutes ("already been opened by user ... on computer ...").
+        if project_path:
+            try:
+                c.call("tia_project_close", {"projectPath": project_path, "saveBeforeClose": False},
+                       timeout=120)
+            except Exception:
+                pass
         try:
             with open(os.path.join(out_root, "worker_stderr.log"), "w", encoding="utf-8", errors="replace") as f:
                 f.write(c.stderr_text())

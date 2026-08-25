@@ -7,10 +7,13 @@ With a .ap21 path: headless-spawn a Portal and open that project. Without: attac
 user already opened (GUI must be up). Only its own scratch block (ZZ_VerifyLeaf) is created and
 deleted — the project's real blocks are only ever PREVIEWED, never deleted:
 
+  * DISCOVERY (2026-08-25): the FB under test is found from live cross-references instead of
+    hardcoded names (an earlier revision assumed FB_CylManual/DB_ManA from a work project that
+    McpTest doesn't contain, so its asserts failed with empty deps)
   * FB with callers + instance DBs  -> Dependents lists them, plan says "will break"
-  * instance DB in active use       -> dependents include UsedBy/InstanceDB + member R/W
+  * NONEXISTENT block               -> preview is Failed (product guard, 2026-08-25), never
+                                       "safe to delete"
   * freshly generated scratch DB    -> "No dependents found" (preview AND applied message)
-Also prints (informational) whether FB CylDoubleSol2Sen (FB411) is still present.
 """
 import sys
 
@@ -53,32 +56,58 @@ def main() -> int:
         device = next(t["path"] for t in targets if t["kind"] == "Plc")
         plc = device + "/plc:program"
 
-        blocks = c.call("tia_block_list", {"path": plc}, timeout=120)
-        fb411 = [b for b in blocks["blocks"] if b["name"] == "CylDoubleSol2Sen"]
-        print(f"FB411 CylDoubleSol2Sen present: {bool(fb411)} (informational)", flush=True)
+        blocks = c.call("tia_block_list", {"path": plc, "limit": 200}, timeout=120)
 
-        # --- positive 1: FB_CylManual is called by OB1 (x5) and typed by 5 instance DBs ---
-        r = c.call("tia_block_delete", {"path": plc + "/block:FB_CylManual"}, timeout=120)
+        # --- DISCOVERY: the positive cases must not hardcode project content (2026-08-25: this
+        # script was written against a work project whose FB_CylManual/DB_ManA don't exist in
+        # McpTest, so its asserts failed with empty deps). Find an FB that actually HAS callers
+        # or instance DBs, and its instance DB, from the live cross-references. ---
+        fbs = [b for b in blocks.get("blocks", []) if b.get("name", "").startswith("FB_")]
+        target_fb = None
+        fb_deps = []
+        for b in fbs:
+            xr = c.call("tia_cross_reference", {"path": plc + "/block:" + b["name"], "aggregate": True},
+                        timeout=120)
+            refs = xr.get("references") or []
+            # aggregate entries carry counts = {"UsedBy/Call": n, "TypeInstance/InstanceDB": m, ...}
+            interesting = [e for e in refs
+                           if any("UsedBy" in k or "TypeInstance" in k for k in (e.get("counts") or {}))]
+            if interesting:
+                target_fb = b["name"]
+                fb_deps = [e.get("name") for e in interesting]
+                break
+        print(f"discovered FB with dependents: {target_fb} <- {fb_deps}", flush=True)
+        assert target_fb, "no FB in this project has callers/instance DBs - pick a richer project"
+
+        # --- positive 1: previewing that FB must report exactly those dependents ---
+        r = c.call("tia_block_delete", {"path": plc + "/block:" + target_fb}, timeout=120)
         assert r["status"] == "AwaitingConfirmation", r
         deps = r.get("dependents") or []
-        print("preview FB_CylManual:")
+        print(f"preview {target_fb}:")
         print("  plan :", r["plan"])
         for d in deps:
             print("  dep  :", d)
-        assert any("Main" in d and "Call" in d for d in deps), f"OB1 caller missing: {deps}"
-        assert sum("InstanceDB" in d for d in deps) == 5, f"expected 5 instance DBs: {deps}"
-        assert "will break" in r["plan"], r["plan"]
+        assert deps, "dependents missing although cross-references exist"
+        assert all(any(n in d for d in deps) for n in fb_deps), f"xref names missing: {fb_deps} vs {deps}"
+        assert "will break" in r["plan"] or "orphaned" in r["plan"], r["plan"]
 
-        # --- positive 2: DB_ManA is NOT a leaf — Main calls FB_CylManual through it and its
-        # members are read/written; the report must surface those (UsedBy/InstanceDB + member R/W) ---
-        r2 = c.call("tia_block_delete", {"path": plc + "/block:DB_ManA"}, timeout=120)
-        assert r2["status"] == "AwaitingConfirmation", r2
-        deps2 = r2.get("dependents") or []
-        print("preview DB_ManA:", len(deps2), "dependent entries")
-        assert any("Main" in d and "InstanceDB" in d for d in deps2), \
-            f"Main UsedBy/InstanceDB missing: {deps2}"
-        assert any("FB_CylManual" in d and "UsedBy" in d for d in deps2), \
-            f"member-access UsedBy missing: {deps2}"
+        # --- positive 2: an instance DB of that FB (if any) previews with member access ---
+        inst_db = next((d for d in deps if "InstanceDB" in d), None)
+        if inst_db:
+            db_name = inst_db.split(" (")[0]
+            r2 = c.call("tia_block_delete", {"path": plc + "/block:" + db_name}, timeout=120)
+            assert r2["status"] == "AwaitingConfirmation", r2
+            deps2 = r2.get("dependents") or []
+            print(f"preview {db_name}: {len(deps2)} dependent entries")
+            assert deps2, f"instance DB {db_name} previewed as a leaf: {r2['plan']}"
+        else:
+            print("(no instance DB among dependents - DB preview leg skipped)", flush=True)
+
+        # --- negative (product guard, fixed 2026-08-25): a NONEXISTENT block must preview as
+        # Failed, never as AwaitingConfirmation with "safe to delete" ---
+        nf = c.call("tia_block_delete", {"path": plc + "/block:ZZ_DefinitelyNotHere"}, timeout=120)
+        print("preview nonexistent block:", str(nf)[:200], flush=True)
+        assert nf.get("status") == "Failed" and "not found" in str(nf.get("message", "")).lower(), nf
 
         # --- negative: a freshly generated scratch DB nobody references is a true leaf ---
         leaf = "ZZ_VerifyLeaf"
@@ -116,6 +145,16 @@ def main() -> int:
         print("\nOK")
         return 0
     finally:
+        # Close the project before the Portal dies, or the next script opening this .ap21 hits
+        # TIA's ~2-minute "not correctly closed" lock (live-verified 2026-08-25 suite cascade).
+        try:
+            if project:
+                name = os.path.splitext(os.path.basename(project))[0]
+                c.call("tia_project_close",
+                       {"projectPath": "session:s-openness/project:" + name, "saveBeforeClose": False},
+                       timeout=120)
+        except Exception:
+            pass
         c.close()
 
 

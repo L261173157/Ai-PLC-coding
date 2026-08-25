@@ -26,6 +26,7 @@ def main() -> int:
     print("########## Openness backend (real TIA V21) ##########")
     err_path = os.path.join(tempfile.gettempdir(), "tiamcp_openness_stderr.log")
     c = Client(dll, "openness", "ReadWrite", client_name="openness-smoke", stderr_path=err_path)
+    proj_path = None
     try:
         tools = c.initialize()
         print(f"  initialized: {len(tools)} tools")
@@ -83,6 +84,14 @@ def main() -> int:
                     else:
                         print("    compile:", comp)
     finally:
+        # Close the project before the server dies, or TIA keeps the "not correctly closed" lock
+        # for ~2 minutes and the NEXT script opening this .ap21 fails (live-verified 2026-08-25).
+        if proj_path:
+            try:
+                c.call("tia_project_close", {"projectPath": proj_path, "saveBeforeClose": False},
+                       timeout=120)
+            except Exception:
+                pass
         c.close()
         err = c.stderr_text().strip()
         if err:
